@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Funfy</string>
+    <string name="identity_funfy">Funfy</string>
+    <string name="identity_calculator">Calculator</string>
+    <string name="identity_notes">Quick Notes</string>
+    <string name="identity_weather">Local Weather</string>
+    <string name="identity_files">My Files</string>
+</resources>

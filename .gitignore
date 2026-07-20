@@ -1,0 +1,75 @@
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Local configuration (SDK path, secrets)
+local.properties
+
+# Android Studio / IntelliJ
+*.iml
+.idea/
+.idea/caches
+.idea/libraries
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kotlin
+.kotlin/
+
+# Captures / NDK
+/captures
+.externalNativeBuild
+.cxx
+
+# Signing (never commit)
+*.jks
+*.keystore
+
+# Local debug dumps / probes (not app source)
+probe*.mjs
+probe*.sh
+probe*.py
+sample_*.html
+sample_*.json
+*_home.html
+*_page.html
+*_embed.html
+device_*.png
+device_*.jpg
+device_*.xml
+funfy_*.png
+funfy_*.jpg
+shennana_page.html
+thai_obf.js
+tmp_pack.txt
+xv.html
+xv_vid.html
+hm_ep.html
+drk_home.html
+mm_home.html
+mm_page.html
+txxx_embed.html
+read_ui.mjs
