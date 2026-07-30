@@ -1,9 +1,10 @@
-﻿package com.example.funfy.data
+package com.example.funfy.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.ArrayDeque
 import java.util.regex.Pattern
 
 /**
@@ -32,8 +33,17 @@ object SourceRegistry {
     private fun createLegacy(source: VideoSource): VideoSourceClient = when (source) {
         VideoSource.PORNHUB -> PornhubClient()
         VideoSource.REDTUBE -> RedTubeClient()
-        VideoSource.HQPORNER -> HqPornerClient()
+        VideoSource.TUBE8 -> Tube8Client()
+        VideoSource.TIAVA -> TiavaClient()
         VideoSource.PINAYOT -> WordPressTubeClient(VideoSource.PINAYOT)
+        VideoSource.IYOTTUBE -> WordPressTubeClient(VideoSource.IYOTTUBE)
+        VideoSource.SPOTIBOLD -> WordPressTubeClient(VideoSource.SPOTIBOLD)
+        VideoSource.XTORJACK -> WordPressTubeClient(VideoSource.XTORJACK)
+        VideoSource.KANTOTPLUS -> WordPressTubeClient(VideoSource.KANTOTPLUS)
+        VideoSource.PINAYVLOG -> WordPressTubeClient(VideoSource.PINAYVLOG)
+        VideoSource.KATORSEX -> WordPressTubeClient(VideoSource.KATORSEX)
+        VideoSource.JAKOLMAN -> WordPressTubeClient(VideoSource.JAKOLMAN)
+        VideoSource.DINOTUBE -> WordPressTubeClient(VideoSource.DINOTUBE)
         VideoSource.PINAYFLIX -> PinayFlixClient()
         VideoSource.PORNKAI -> PornKaiClient()
         VideoSource.PINAYPORNSITE -> WordPressTubeClient(VideoSource.PINAYPORNSITE)
@@ -41,15 +51,27 @@ object SourceRegistry {
         VideoSource.BUUMAL -> BuumalClient()
         VideoSource.MMHDHUB -> MmhdHubClient()
         VideoSource.BABEXTUBE -> BabeXTubeClient()
-        VideoSource.XXXTIME -> XxxTimeClient()
-        VideoSource.MISSAV -> MissAvClient()
+        VideoSource.XBURMA -> XBurmaClient()
+        VideoSource.KOSARGYI -> WordPressTubeClient(VideoSource.KOSARGYI)
+        VideoSource.XGROOVY -> WordPressTubeClient(VideoSource.XGROOVY)
+        VideoSource.MRNOEGYI -> WordPressTubeClient(VideoSource.MRNOEGYI)
+        VideoSource.MAYNOE -> WordPressTubeClient(VideoSource.MAYNOE)
+        VideoSource.APYARGABAR -> WordPressTubeClient(VideoSource.APYARGABAR)
+        VideoSource.JABLE -> JableClient()
+        VideoSource.SUPJAV -> SupJavClient()
         VideoSource.JAVFREE -> JavFreeClient()
         VideoSource.JAVTSUNAMI -> JavTsunamiClient()
         VideoSource.ONETWOAV -> OneTwoThreeAvClient()
         VideoSource.JAVSEEN -> JavSeenClient()
+        VideoSource.JAVTUB -> WordPressTubeClient(VideoSource.JAVTUB)
         VideoSource.INDO18 -> WordPressTubeClient(VideoSource.INDO18)
         VideoSource.BOKEPBOX -> WordPressTubeClient(VideoSource.BOKEPBOX)
         VideoSource.BOKEPINDOHOT -> WordPressTubeClient(VideoSource.BOKEPINDOHOT)
+        VideoSource.PROBOKEP -> WordPressTubeClient(VideoSource.PROBOKEP)
+        VideoSource.GAIRAHTV -> WordPressTubeClient(VideoSource.GAIRAHTV)
+        VideoSource.BOKEPBOZ -> WordPressTubeClient(VideoSource.BOKEPBOZ)
+        VideoSource.KINGBOKEP -> WordPressTubeClient(VideoSource.KINGBOKEP)
+        VideoSource.HEIBOKEP -> WordPressTubeClient(VideoSource.HEIBOKEP)
         VideoSource.BEBASINDO -> BebasIndoClient()
         VideoSource.NONTONBOKEP -> NontonBokepClient()
         VideoSource.THAIPORNTV -> ThaiPornTvClient()
@@ -101,6 +123,41 @@ object SourceRegistry {
         )
         VideoSource.SEXVID -> SexvidClient()
         VideoSource.ANALDIN -> AnaldinClient()
+        VideoSource.XHAMSTER2 -> XHamster2Client()
+        VideoSource.BEEG -> BeegClient()
+        VideoSource.TXXX -> TxxxClient()
+        VideoSource.XXXFILES -> GenericTubeClient(
+            source = source,
+            homePaths = { p ->
+                if (p <= 1) listOf("/latest-updates/", "/") else listOf("/latest-updates/$p/")
+            },
+            searchPath = { q, p ->
+                if (p <= 1) "/search/$q/" else "/search/$q/$p/"
+            },
+            linkPatterns = listOf(
+                """href="(https?://(?:www\.)?xxxfiles\.com/videos/\d+/[^"]+)"""",
+                """href="(/videos/\d+/[^"]+)"""",
+            ),
+        )
+        VideoSource.XASIAT -> GenericTubeClient(
+            source = source,
+            homePaths = { p ->
+                if (p <= 1) listOf("/latest-updates/", "/") else listOf("/latest-updates/$p/")
+            },
+            searchPath = { q, p ->
+                if (p <= 1) "/search/$q/" else "/search/$q/$p/"
+            },
+            linkPatterns = listOf(
+                """href="(https?://(?:www\.)?xasiat\.com/videos/\d+/[^"]+)"""",
+                """href="(/videos/\d+/[^"]+)"""",
+            ),
+        )
+        VideoSource.KALDAGAN,
+        VideoSource.LOOTEDPINAY,
+        -> WordPressTubeClient(source)
+        VideoSource.PINAYUM,
+        VideoSource.PWERTA,
+        -> PhPinaySiteClient(source)
         else -> error("${source.label} is not a legacy source")
     }
 }
@@ -228,6 +285,20 @@ internal fun extractCleanTubeStreams(htmlOrUrl: String): List<StreamOption> {
     return out.values.toList()
 }
 
+/** Reject URLs with empty host (e.g. https://.etvp.cc/...) or other unusable forms. */
+internal fun isValidMediaUrl(url: String): Boolean {
+    if (!url.startsWith("http://") && !url.startsWith("https://")) return false
+    // Explicit broken CDN pattern from turbovid dead embeds
+    if (url.contains("://.", ignoreCase = false)) return false
+    return try {
+        val u = java.net.URI(url)
+        val host = u.host.orEmpty()
+        host.isNotBlank() && !host.startsWith(".") && host.contains('.')
+    } catch (_: Exception) {
+        false
+    }
+}
+
 internal fun collectMp4AndHls(html: String, base: String = ""): List<StreamOption> {
     val options = linkedMapOf<String, StreamOption>()
     // KVS license used to unscramble function/0/get_file hashes (Sexvid, etc.)
@@ -246,6 +317,8 @@ internal fun collectMp4AndHls(html: String, base: String = ""): List<StreamOptio
         if (url.startsWith("//")) url = "https:$url"
         if (url.startsWith("/") && base.isNotBlank()) url = NetworkClient.absoluteUrl(base, url)
         if (!url.startsWith("http")) return
+        // Reject broken hosts like https://.etvp.cc/uploads/... (empty subdomain).
+        if (!isValidMediaUrl(url)) return
         if (url.contains("trailer", true) && !url.contains("full", true)) return
         if (url.contains("_preview", true) || url.contains("short_preview", true)) return
         if (url.contains("_vthumb", true)) return
@@ -280,6 +353,25 @@ internal fun collectMp4AndHls(html: String, base: String = ""): List<StreamOptio
     ).matcher(html)
     while (sourceTag.find()) {
         val u = sourceTag.group(1) ?: continue
+        add(labelFor(u), u)
+    }
+
+    // JWPlayer / Video.js / JS player file: "..." or src: "..." or source: "..."
+    val jsFile = Pattern.compile(
+        """(?:file|source|video_url|videoUrl|src)\s*:\s*["']((?:https?:)?//[^"'\s]+\.(?:mp4|m3u8)[^"'\s]*)["']""",
+        Pattern.CASE_INSENSITIVE,
+    ).matcher(html)
+    while (jsFile.find()) {
+        val u = jsFile.group(1) ?: continue
+        add(labelFor(u), u)
+    }
+
+    val dataVid = Pattern.compile(
+        """data-(?:video|src|file|stream)=["']((?:https?:)?//[^"'\s]+\.(?:mp4|m3u8)[^"'\s]*)["']""",
+        Pattern.CASE_INSENSITIVE,
+    ).matcher(html)
+    while (dataVid.find()) {
+        val u = dataVid.group(1) ?: continue
         add(labelFor(u), u)
     }
 
@@ -429,7 +521,7 @@ class EpornerClient(
             NetworkClient.formatDurationSec(json.optInt("length_sec", 0))
         }
         val thumb = json.optJSONObject("default_thumb")?.optString("src").orEmpty()
-        val rate = json.optString("rate").takeIf { it.isNotBlank() }?.let { "$it â˜…" } ?: "â€”"
+        val rate = json.optString("rate").takeIf { it.isNotBlank() }?.let { "$it ★" } ?: "—"
         val keywords = json.optString("keywords").split(',').map { it.trim() }.filter { it.isNotBlank() }.take(16)
         val page = json.optString("url").ifBlank { pageUrl }.replace("\\/", "/")
 
@@ -659,14 +751,14 @@ class PornhubClient : VideoSourceClient {
                 ).replace("&amp;", "&")
             val duration = NetworkClient.matchFirst(window, """class="duration"[^>]*>([^<]+)<""")
                 ?: NetworkClient.matchFirst(window, """>(\d{1,2}:\d{2})</""")
-                ?: "Ã¢â‚¬â€"
+                ?: "—"
             items.add(
                 VideoItem(
                     id = id,
                     title = title,
                     duration = duration.trim(),
                     resolution = "HD",
-                    views = "Ã¢â‚¬â€",
+                    views = "—",
                     category = "Pornhub",
                     gradientSeed = index++,
                     pageUrl = NetworkClient.absoluteUrl(source.baseUrl, path),
@@ -767,9 +859,9 @@ class RedTubeClient : VideoSourceClient {
             streams = streams,
             title = title,
             uploader = "RedTube",
-            views = "Ã¢â‚¬â€",
-            ratingPercent = "Ã¢â‚¬â€",
-            duration = "Ã¢â‚¬â€",
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).take(18),
@@ -862,13 +954,51 @@ class RedTubeClient : VideoSourceClient {
 
     private fun extractStreams(html: String): List<StreamOption> {
         val options = linkedMapOf<String, StreamOption>()
-        // Direct CDN mp4s embedded in page
+
+        // 1) Parse mediaDefinitions (contains the real full video streams)
+        val def = NetworkClient.matchFirst(html, """"mediaDefinitions"\s*:\s*(\[[\s\S]*?\])""")
+        if (def != null) {
+            try {
+                val arr = JSONArray(def)
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val format = o.optString("format")
+                    var videoUrl = o.optString("videoUrl").replace("\\/", "/").replace("&amp;", "&")
+                    if (videoUrl.isBlank()) continue
+                    if (videoUrl.startsWith("/")) {
+                        videoUrl = NetworkClient.absoluteUrl(source.baseUrl, videoUrl)
+                    }
+                    if (videoUrl.contains("ev-") || videoUrl.contains("preview") || videoUrl.contains("sample")) continue
+                    // Resolve remote JSON that points to real files
+                    if (o.optBoolean("remote", false) || videoUrl.contains("/media/")) {
+                        try {
+                            val body = NetworkClient.get(videoUrl, source.baseUrl + "/")
+                            if (body.trimStart().startsWith("{") || body.trimStart().startsWith("[")) {
+                                parseRemoteMediaJson(body, options)
+                                continue
+                            }
+                            if (body.contains("#EXTM3U")) {
+                                options.putIfAbsent("Auto (HLS)", StreamOption("Auto (HLS)", videoUrl))
+                                continue
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+                    val label = if (format == "hls") "Auto (HLS)" else "MP4"
+                    options.putIfAbsent(label, StreamOption(label, videoUrl))
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        // 2) Fallback direct full CDN mp4s embedded in page (excluding 9-sec ev- preview clips)
         val cdn = Pattern.compile(
-            """(https://ev-[^"'\\\s]+\.mp4[^"'\\\s]*)""",
+            """(https://(?!ev-)[^"'\\\s]+\.mp4[^"'\\\s]*)""",
             Pattern.CASE_INSENSITIVE,
         ).matcher(html)
         while (cdn.find()) {
             val u = cdn.group(1)?.replace("&amp;", "&") ?: continue
+            if (u.contains("ev-") || u.contains("preview") || u.contains("sample")) continue
             val label = when {
                 "1080" in u -> "1080p"
                 "720" in u -> "720p"
@@ -878,43 +1008,7 @@ class RedTubeClient : VideoSourceClient {
             }
             options.putIfAbsent(label, StreamOption(label, u))
         }
-        // mediaDefinitions relative endpoints
-        val def = NetworkClient.matchFirst(html, """"mediaDefinitions"\s*:\s*(\[[\s\S]*?\])""")
-        if (def != null) {
-            try {
-                val arr = JSONArray(def)
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    val format = o.optString("format")
-                    var videoUrl = o.optString("videoUrl").replace("\\/", "/")
-                    if (videoUrl.isBlank()) continue
-                    if (videoUrl.startsWith("/")) {
-                        videoUrl = NetworkClient.absoluteUrl(source.baseUrl, videoUrl)
-                    }
-                    // Resolve remote JSON that points to real files
-                    if (o.optBoolean("remote", false) || videoUrl.contains("/media/")) {
-                        try {
-                            val body = NetworkClient.get(videoUrl, source.baseUrl + "/")
-                            if (body.trimStart().startsWith("{") || body.trimStart().startsWith("[")) {
-                                parseRemoteMediaJson(body, options)
-                                continue
-                            }
-                            // might already be m3u8 text
-                            if (body.contains("#EXTM3U")) {
-                                options.putIfAbsent("Auto (HLS)", StreamOption("Auto (HLS)", videoUrl))
-                                continue
-                            }
-                        } catch (_: Exception) {
-                            // fall through and use endpoint itself
-                        }
-                    }
-                    val label = if (format == "hls") "Auto (HLS)" else "MP4"
-                    options.putIfAbsent(label, StreamOption(label, videoUrl))
-                }
-            } catch (_: Exception) {
-                // ignore
-            }
-        }
+
         return options.values.sortedByDescending {
             it.label.filter(Char::isDigit).toIntOrNull() ?: if (it.label.contains("HLS")) 50 else 0
         }
@@ -946,22 +1040,28 @@ class RedTubeClient : VideoSourceClient {
     }
 }
 
+
+
 // ---------------------------------------------------------------------------
-// HQPorner (embed on mydaddy.cc Ã¢â€ â€™ bigcdn.cc MP4s)
+// Tube8 (Direct scraper)
 // ---------------------------------------------------------------------------
 
-class HqPornerClient : VideoSourceClient {
-    override val source = VideoSource.HQPORNER
+class Tube8Client : VideoSourceClient {
+    override val source = VideoSource.TUBE8
 
-    override suspend fun fetchHomeVideos(page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
+    override suspend fun fetchHomeVideos(page: Int): List<VideoItem> = search("", page)
+
+    override suspend fun search(query: String): List<VideoItem> = search(query, 1)
+
+    override suspend fun search(query: String, page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
         val p = page.coerceAtLeast(1)
-        val url = if (p <= 1) source.baseUrl + "/" else "${source.baseUrl}/$p"
-        parseListing(NetworkClient.get(url, source.baseUrl))
-    }
-
-    override suspend fun search(query: String): List<VideoItem> = withContext(Dispatchers.IO) {
         val q = java.net.URLEncoder.encode(query.trim(), Charsets.UTF_8.name())
-        parseListing(NetworkClient.get("${source.baseUrl}/?q=$q", source.baseUrl))
+        val url = if (q.isBlank()) {
+            if (p <= 1) source.baseUrl + "/" else "${source.baseUrl}/page/$p/"
+        } else {
+            "${source.baseUrl}/searches.html?q=$q&page=$p"
+        }
+        parseListing(NetworkClient.get(url, source.baseUrl))
     }
 
     override suspend fun fetchVideoDetails(pageUrl: String): VideoDetails = withContext(Dispatchers.IO) {
@@ -970,72 +1070,19 @@ class HqPornerClient : VideoSourceClient {
             NetworkClient.matchFirst(html, """property="og:title"\s+content="([^"]+)"""")
                 ?: NetworkClient.matchFirst(html, """<title>([^<]+)</title>""")
                 ?: "Video",
-        ).substringBefore(" - HQ").trim()
+        ).substringBefore(" - Tube8").trim()
         val thumb = NetworkClient.matchFirst(html, """property="og:image"\s+content="([^"]+)"""")
             .orEmpty()
-
-        val embed = NetworkClient.matchFirst(html, """iframe[^>]+src=["'](//mydaddy\.cc/video/[^"']+)["']""")
-            ?: NetworkClient.matchFirst(html, """iframe[^>]+src=["'](https://mydaddy\.cc/video/[^"']+)["']""")
-            ?: throw IllegalStateException("HQPorner embed not found")
-        var embedUrl = if (embed.startsWith("//")) "https:$embed" else embed
-        // `&alt` mobile player embeds direct bigcdn.cc /{q}.mp4 links.
-        if (!embedUrl.contains("alt", true)) {
-            embedUrl = embedUrl.trimEnd('/') + "/&alt"
-        }
-        val embedHtml = NetworkClient.get(embedUrl, pageUrl)
-        var streams = extractBigcdnStreams(embedHtml)
+        val streams = collectMp4AndHls(html, pageUrl)
         if (streams.isEmpty()) {
-            streams = collectMp4AndHls(embedHtml)
-                .filter { !it.url.contains("tile.vtt") && !it.url.contains(".vtt") }
+            throw IllegalStateException("Video has been removed")
         }
-        if (streams.isEmpty()) {
-            // Retry default embed page
-            val plain = NetworkClient.get(
-                embedUrl.replace("/&alt", "/").replace("?alt", ""),
-                pageUrl,
-            )
-            streams = extractBigcdnStreams(plain) + collectMp4AndHls(plain)
-        }
-        streams = streams
-            .map {
-                val u = if (it.url.startsWith("//")) "https:${it.url}" else it.url
-                it.copy(
-                    url = u,
-                    label = NetworkClient.guessQualityLabel(u, it.label).let { g ->
-                        if (g.isBlank()) it.label else g
-                    },
-                )
-            }
-            .distinctBy { it.url }
-            .sortedByDescending { it.label.filter(Char::isDigit).toIntOrNull() ?: 0 }
-        if (streams.isEmpty()) {
-            throw IllegalStateException("No streams in HQPorner embed")
-        }
-
-        // Prefer 720p first for faster start; user can switch quality in player.
-        streams = streams.sortedWith(
-            compareByDescending<StreamOption> {
-                val q = it.label.filter(Char::isDigit).toIntOrNull() ?: 0
-                when {
-                    q == 720 -> 10_000
-                    q == 480 -> 9_000
-                    q == 360 -> 8_000
-                    q == 1080 -> 7_000
-                    else -> q
-                }
-            },
-        )
-
-        val currentId = NetworkClient.matchFirst(pageUrl, """/hdporn/(\d+)-""")
-        val related = parseListing(html)
-            .filterNot { it.id == currentId }
-            .take(18)
-
+        val related = parseListing(html).filter { it.pageUrl != pageUrl }.take(18)
         VideoDetails(
             streamUrl = streams.first().url,
             streams = streams,
             title = title,
-            uploader = "HQPorner",
+            uploader = source.label,
             views = "—",
             ratingPercent = "—",
             duration = "—",
@@ -1046,89 +1093,164 @@ class HqPornerClient : VideoSourceClient {
         )
     }
 
-    private fun extractBigcdnStreams(html: String): List<StreamOption> {
-        val out = linkedMapOf<String, StreamOption>()
-        // //s70.bigcdn.cc/pubs/HASH/360.mp4 or 720.mp4 / 1080.mp4
-        val m = Pattern.compile(
-            """(//s\d+\.bigcdn\.cc/pubs/[^"'\\\s]+/(\d{3,4})\.mp4)""",
-            Pattern.CASE_INSENSITIVE,
-        ).matcher(html)
-        while (m.find()) {
-            val path = m.group(1) ?: continue
-            val q = m.group(2) ?: "MP4"
-            val url = if (path.startsWith("//")) "https:$path" else path
-            out["${q}p"] = StreamOption("${q}p", url)
-        }
-        val m2 = Pattern.compile(
-            """(https?://s\d+\.bigcdn\.cc/pubs/[^"'\\\s]+\.mp4)""",
-            Pattern.CASE_INSENSITIVE,
-        ).matcher(html)
-        while (m2.find()) {
-            val url = m2.group(1) ?: continue
-            val label = NetworkClient.guessQualityLabel(url, "MP4").ifBlank { "MP4" }
-            out.putIfAbsent(label, StreamOption(label, url))
-        }
-        return out.values.toList()
-    }
-
     private fun parseListing(html: String): List<VideoItem> {
-        val items = mutableListOf<VideoItem>()
+        val out = mutableListOf<VideoItem>()
         val seen = mutableSetOf<String>()
-        val m = Pattern.compile(
-            """href="(/hdporn/(\d+)-([^"]+\.html))"""",
+        val matcher = Pattern.compile(
+            """<a\s+[^>]*href=["']((?:https?://[^"']*)?/[^"']+)["'][^>]*>[\s\S]{0,800}?<img[^>]+(?:data-src|data-thumb|src)=["']([^"']+)["'][^>]*alt=["']([^"']+)["']""",
             Pattern.CASE_INSENSITIVE,
         ).matcher(html)
-        var index = 0
-        while (m.find()) {
-            val path = m.group(1) ?: continue
-            val id = m.group(2) ?: continue
-            if (!seen.add(id)) continue
-            val slug = m.group(3)?.removeSuffix(".html")?.replace('_', ' ') ?: id
-            // Related cards often put img after the link — widen window both sides.
-            val window = html.substring(
-                (m.start() - 200).coerceAtLeast(0),
-                (m.start() + 1200).coerceAtMost(html.length),
-            )
-            val thumb = NetworkClient.matchFirst(
-                window,
-                """(?:data-src|src)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
-            ) ?: NetworkClient.matchFirst(
-                window,
-                """(?:data-src|src)="(//[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
-            )?.let { if (it.startsWith("//")) "https:$it" else it }
-                ?: NetworkClient.matchFirst(
-                    window,
-                    """background(?:-image)?\s*:\s*url\(['"]?(https?://[^"')]+)""",
+        var i = 0
+        while (matcher.find()) {
+            val href = matcher.group(1) ?: continue
+            val thumb = matcher.group(2) ?: ""
+            val title = NetworkClient.decodeHtml(matcher.group(3) ?: "").trim()
+            if (href.contains("/categories/") || href.contains("/tags/") || href.contains("javascript:")) continue
+            val fullUrl = NetworkClient.absoluteUrl(source.baseUrl, href)
+            val id = fullUrl.trimEnd('/').substringAfterLast('/')
+            if (id.isBlank() || !seen.add(id)) continue
+            if (title.isNotBlank()) {
+                out.add(
+                    VideoItem(
+                        id = id,
+                        title = title,
+                        duration = "—",
+                        resolution = "HD",
+                        views = "—",
+                        category = source.label,
+                        gradientSeed = i++,
+                        pageUrl = fullUrl,
+                        thumbnailUrl = thumb,
+                        sourceId = source.id,
+                    ),
                 )
-                ?: ""
-            val title = NetworkClient.decodeHtml(
-                NetworkClient.matchFirst(window, """alt="([^"]+)"""")
-                    ?: NetworkClient.matchFirst(window, """title="([^"]+)"""")
-                    ?: slug,
-            )
-            items.add(
-                VideoItem(
-                    id = id,
-                    title = title,
-                    duration = NetworkClient.matchFirst(window, """>(\d{1,2}:\d{2}(?::\d{2})?)</""")
-                        ?: "—",
-                    resolution = "HD",
-                    views = "—",
-                    category = "HQPorner",
-                    gradientSeed = index++,
-                    pageUrl = NetworkClient.absoluteUrl(source.baseUrl, path),
-                    thumbnailUrl = thumb,
-                    sourceId = source.id,
-                ),
-            )
-            if (items.size >= 50) break
+            }
         }
-        return items
+        if (out.isEmpty()) {
+            val m2 = Pattern.compile(
+                """href=["']((?:https?://[^"']*)?/[^"']+)["'][^>]*title=["']([^"']+)["']""",
+                Pattern.CASE_INSENSITIVE,
+            ).matcher(html)
+            while (m2.find()) {
+                val href = m2.group(1) ?: continue
+                val title = NetworkClient.decodeHtml(m2.group(2) ?: "").trim()
+                if (href.contains("categories") || href.contains("tags") || title.isBlank()) continue
+                val fullUrl = NetworkClient.absoluteUrl(source.baseUrl, href)
+                val id = fullUrl.trimEnd('/').substringAfterLast('/')
+                if (id.isNotBlank() && seen.add(id)) {
+                    out.add(
+                        VideoItem(
+                            id = id,
+                            title = title,
+                            duration = "—",
+                            resolution = "HD",
+                            views = "—",
+                            category = source.label,
+                            gradientSeed = i++,
+                            pageUrl = fullUrl,
+                            thumbnailUrl = "",
+                            sourceId = source.id,
+                        ),
+                    )
+                }
+            }
+        }
+        return out
     }
 }
 
 // ---------------------------------------------------------------------------
-// WordPress tubes (Indo18 / PinayOT) Ã¢â‚¬â€ article cards + direct mp4/source
+// Tiava (Global Provider)
+// ---------------------------------------------------------------------------
+
+class TiavaClient : VideoSourceClient {
+    override val source = VideoSource.TIAVA
+
+    override suspend fun fetchHomeVideos(page: Int): List<VideoItem> = search("", page)
+
+    override suspend fun search(query: String): List<VideoItem> = search(query, 1)
+
+    override suspend fun search(query: String, page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
+        val p = page.coerceAtLeast(1)
+        val q = java.net.URLEncoder.encode(query.trim(), Charsets.UTF_8.name())
+        val url = if (q.isBlank()) {
+            if (p <= 1) source.baseUrl + "/" else "${source.baseUrl}/videos/$p/"
+        } else {
+            "${source.baseUrl}/search/$q/$p/"
+        }
+        parseListing(NetworkClient.get(url, source.baseUrl))
+    }
+
+    override suspend fun fetchVideoDetails(pageUrl: String): VideoDetails = withContext(Dispatchers.IO) {
+        val html = NetworkClient.get(pageUrl, source.baseUrl)
+        val title = NetworkClient.decodeHtml(
+            NetworkClient.matchFirst(html, """property="og:title"\s+content="([^"]+)"""")
+                ?: NetworkClient.matchFirst(html, """<title>([^<]+)</title>""")
+                ?: "Video",
+        ).substringBefore(" - Tiava").substringBefore(" | ").trim()
+        val thumb = NetworkClient.matchFirst(html, """property="og:image"\s+content="([^"]+)"""")
+            .orEmpty()
+        val streams = collectMp4AndHls(html, pageUrl)
+        if (streams.isEmpty()) {
+            throw IllegalStateException("Video has been removed")
+        }
+        val related = parseListing(html).filter { it.pageUrl != pageUrl }.take(18)
+        VideoDetails(
+            streamUrl = streams.first().url,
+            streams = streams,
+            title = title,
+            uploader = source.label,
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
+            resolution = streams.first().label,
+            tags = emptyList(),
+            related = related,
+            thumbnailUrl = thumb,
+        )
+    }
+
+    private fun parseListing(html: String): List<VideoItem> {
+        val out = mutableListOf<VideoItem>()
+        val seen = mutableSetOf<String>()
+        val matcher = Pattern.compile(
+            """<a\s+[^>]*href=["']((?:https?://[^"']*)?/[^"']+)["'][^>]*>[\s\S]{0,800}?<img[^>]+(?:data-src|data-lazy-src|src)=["']([^"']+)["'][^>]*alt=["']([^"']+)["']""",
+            Pattern.CASE_INSENSITIVE,
+        ).matcher(html)
+        var i = 0
+        while (matcher.find()) {
+            val href = matcher.group(1) ?: continue
+            val thumb = matcher.group(2) ?: ""
+            val title = NetworkClient.decodeHtml(matcher.group(3) ?: "").trim()
+            if (href.contains("/categories/") || href.contains("/tags/") || href.contains("javascript:")) continue
+            val fullUrl = NetworkClient.absoluteUrl(source.baseUrl, href)
+            val id = fullUrl.trimEnd('/').substringAfterLast('/')
+            if (id.isBlank() || !seen.add(id)) continue
+            if (title.isNotBlank()) {
+                out.add(
+                    VideoItem(
+                        id = id,
+                        title = title,
+                        duration = "—",
+                        resolution = "HD",
+                        views = "—",
+                        category = source.label,
+                        gradientSeed = i++,
+                        pageUrl = fullUrl,
+                        thumbnailUrl = thumb,
+                        sourceId = source.id,
+                    ),
+                )
+            }
+        }
+        return out
+    }
+}
+
+
+
+// ---------------------------------------------------------------------------
+// WordPress tubes (Indo18 / PinayOT) — article cards + direct mp4/source
 // ---------------------------------------------------------------------------
 
 class WordPressTubeClient(
@@ -1199,70 +1321,125 @@ class WordPressTubeClient(
         }
         if (hostPreferred.isNotEmpty()) streams = hostPreferred + streams.filter { it !in hostPreferred }
 
-        // Follow iframe embeds (Indo18 → jomblo → playmogo / luluvid / etc.)
-        var embedUrl: String? = null
+        // Follow iframe embeds (Indo18 → jomblo → playmogo/dood, etc.) — resolve to direct media.
         var depth = 0
         var currentHtml = html
-        while (streams.isEmpty() && depth < 4) {
-            val iframes = collectIframeSrcs(currentHtml)
-                .map { NetworkClient.absoluteUrl(pageUrl, it) }
-                .filter { src ->
-                    !src.contains("googletag", true) &&
-                        !src.contains("/ad", true) &&
-                        !src.contains("histats", true) &&
-                        !src.contains("doubleclick", true) &&
-                        !src.contains("dazedengage", true)
-                }
-            if (iframes.isEmpty()) break
-            val next = iframes.first()
-            embedUrl = next
-            // Decode clean-tube player payload from the iframe URL itself (no extra hop).
+        var currentRef = pageUrl
+        val queue = ArrayDeque<String>()
+        collectIframeSrcs(html)
+            .map { NetworkClient.absoluteUrl(pageUrl, it) }
+            .filter { isPlayerIframe(it) }
+            .forEach { queue.add(it) }
+        // Also itemprop embedURL (BokepIndoHot meta)
+        NetworkClient.matchFirst(html, """itemprop="embedURL"\s+content="([^"]+)"""")
+            ?.let { emb ->
+                val u = if (emb.startsWith("http://")) "https://" + emb.removePrefix("http://") else emb
+                if (isPlayerIframe(u) && u !in queue) queue.add(u)
+            }
+
+        while (streams.isEmpty() && queue.isNotEmpty() && depth < 6) {
+            val next = queue.removeFirst()
+            depth++
+            // Clean-tube base64 payload in iframe URL
             val fromQ = extractCleanTubeStreams(next)
             if (fromQ.isNotEmpty()) {
                 streams = fromQ
                 break
             }
+            // BokepIndoHot: playerbtc is a mirror hub → turbovid / dood / …
+            if (next.contains("playerbtc", true)) {
+                val btc = resolvePlayerBtcEmbed(next, pageUrl)
+                if (btc.isNotEmpty()) {
+                    streams = btc
+                    break
+                }
+            }
+            // DoodStream family (playmogo / doodstream)
+            if (isDoodHost(next)) {
+                val dood = resolveDoodStreamEmbed(next, currentRef)
+                if (dood.isNotEmpty()) {
+                    streams = dood
+                    break
+                }
+            }
+            if (next.contains("turbovid") || next.contains("turboviplay")) {
+                val turbo = resolveTurbovidEmbed(next, currentRef)
+                if (turbo.isNotEmpty()) {
+                    streams = turbo
+                    break
+                }
+            }
+            if (isStreamWishHost(next)) {
+                val wish = resolveStreamWishEmbed(next, currentRef)
+                if (wish.isNotEmpty()) {
+                    streams = wish
+                    break
+                }
+            }
             try {
-                currentHtml = NetworkClient.get(next, pageUrl)
+                currentHtml = NetworkClient.get(next, currentRef)
+                currentRef = next
                 val nestedClean = extractCleanTubeStreams(currentHtml)
-                val nested = if (nestedClean.isNotEmpty()) {
-                    nestedClean
-                } else {
-                    collectMp4AndHls(currentHtml)
+                val nested = when {
+                    nestedClean.isNotEmpty() -> nestedClean
+                    else -> collectMp4AndHls(currentHtml)
                         .filter { !it.url.contains("trailer", ignoreCase = true) }
                 }
                 if (nested.isNotEmpty()) {
                     streams = nested
                     break
                 }
-                depth++
+                // Nested iframes (jomblo → playmogo)
+                collectIframeSrcs(currentHtml)
+                    .map { NetworkClient.absoluteUrl(next, it) }
+                    .filter { isPlayerIframe(it) }
+                    .forEach { queue.add(it) }
+                // Dood pass on this page
+                if (currentHtml.contains("pass_md5", true)) {
+                    val dood = resolveDoodStreamEmbed(next, pageUrl)
+                    if (dood.isNotEmpty()) {
+                        streams = dood
+                        break
+                    }
+                }
             } catch (_: Exception) {
-                depth++
             }
         }
 
-        // Still no direct file: play embed in WebView (works for Indo18 jomblo player)
+        streams = streams
+            .map { it.copy(url = NetworkClient.sanitizeMediaUrl(it.url)) }
+            .filter { !it.label.equals("Embed", true) }
+            .distinctBy { it.url }
+        // Page-local related; DataRepository enriches with title/search if thin.
+        val related = parseListing(html).filter { it.pageUrl != pageUrl }.take(18)
+
+        // BokepBox / BokepIndoHot / PinayOT etc. often use dead playerbtc / dood hosts.
+        // Recover playback by mirroring the same clip from XVideos as a last resort.
         if (streams.isEmpty()) {
-            val firstIframe = collectIframeSrcs(html)
-                .map { NetworkClient.absoluteUrl(pageUrl, it) }
-                .firstOrNull {
-                    !it.contains("googletag", true) &&
-                        !it.contains("histats", true) &&
-                        !it.contains("dazedengage", true)
-                }
-            embedUrl = embedUrl ?: firstIframe
-            if (embedUrl.isNullOrBlank()) {
-                throw IllegalStateException("No playable stream on ${source.label}")
-            }
-            streams = listOf(StreamOption(label = "Embed", url = embedUrl!!))
+            xvideosMirrorFallback(
+                title = title,
+                pageUrl = pageUrl,
+                source = source,
+                thumb = thumb,
+                related = related,
+            )?.let { return@withContext it }
         }
+        // No WebView embed fallback — user wants real streams only.
+        if (streams.isEmpty()) {
+            throw IllegalStateException("No direct stream on ${source.label}")
+        }
+
 
         // Skip slow HEAD size probes for cross-host Clean Tube mp4s (was delaying / stalling play).
+        // LootedPinay/pinaydeepweb files are ~100–200MB progressive — HEAD just adds lag.
         val distinct = streams.distinctBy { it.url }
         val sized = if (
             distinct.any {
                 it.url.contains("drkogyi", true) ||
-                    it.url.contains("/uploads/", true)
+                    it.url.contains("/uploads/", true) ||
+                    it.url.contains("pinaydeepweb", true) ||
+                    it.url.contains("lootedpinay", true) ||
+                    it.url.contains("wp-content", true)
             }
         ) {
             distinct
@@ -1273,9 +1450,6 @@ class WordPressTubeClient(
                 distinct
             }
         }
-
-        // Page-local related; DataRepository enriches with title/search if thin.
-        val related = parseListing(html).filter { it.pageUrl != pageUrl }.take(18)
 
         val preferred = pickDefaultStream(sized) ?: sized.first()
         VideoDetails(
@@ -1290,21 +1464,33 @@ class WordPressTubeClient(
             tags = emptyList(),
             related = related,
             thumbnailUrl = thumb,
-            embedUrl = if (preferred.label == "Embed") embedUrl else null,
+            embedUrl = null,
         )
+    }
+
+    private fun isPlayerIframe(src: String): Boolean {
+        val s = src.lowercase()
+        if (s.isBlank()) return false
+        if (s.contains("googletag") || s.contains("doubleclick") || s.contains("histats")) return false
+        if (s.contains("a-ads.com") || s.contains("juicyads") || s.contains("exoclick")) return false
+        if (s.contains("/ad") && !s.contains("/admin")) return false
+        if (s.contains("dazedengage")) return false
+        return true
     }
 
     private fun collectIframeSrcs(html: String): List<String> {
         val out = mutableListOf<String>()
         val m = Pattern.compile(
-            """iframe[^>]+src=["']([^"']+)["']""",
+            """iframe[^>]+(?:data-src|data-lazy-src|data-url|src)=["']([^"']+)["']""",
             Pattern.CASE_INSENSITIVE,
         ).matcher(html)
         while (m.find()) {
             val src = m.group(1) ?: continue
-            if (src.isNotBlank()) out.add(src)
+            if (src.isNotBlank() && !src.startsWith("about:") && !src.startsWith("javascript:")) {
+                out.add(src)
+            }
         }
-        return out
+        return out.distinct()
     }
 
     private fun parseListing(html: String): List<VideoItem> {
@@ -1449,12 +1635,32 @@ class WordPressTubeClient(
             }
         }
 
+        // 6) Universal WP / KVS / WordPress card parser for GairahTV, BokepBoz, XBurma, ProBokep, KingBokep, HeiBokep, etc.
+        if (items.size < 12) {
+            val cardMatcher = Pattern.compile(
+                """<a\s+[^>]*href=["']((?:https?://[^"']*)?/[^"']+)["'][^>]*>[\s\S]{0,800}?<img[^>]+(?:data-src|data-lazy-src|data-original|src)=["']([^"']+\.(?:jpg|jpeg|png|webp|gif)[^"']*)["'][^>]*>""",
+                Pattern.CASE_INSENSITIVE,
+            ).matcher(html)
+            while (cardMatcher.find() && items.size < 60) {
+                val href = cardMatcher.group(1).orEmpty()
+                val thumb = cardMatcher.group(2).orEmpty()
+                val win = html.substring((cardMatcher.start() - 100).coerceAtLeast(0), (cardMatcher.end() + 600).coerceAtMost(html.length))
+                val title = NetworkClient.matchFirst(win, """alt=["']([^"']{2,})["']""")
+                    ?: NetworkClient.matchFirst(win, """title=["']([^"']{2,})["']""")
+                    ?: NetworkClient.matchFirst(win, """<h[234][^>]*>\s*<a[^>]*>([^<]{2,})</a>""")
+                    ?: href.trimEnd('/').substringAfterLast('/').replace('-', ' ')
+                if (href.isNotBlank() && title.length >= 2) {
+                    addItem(href, title, thumb, windowHtml = win)
+                }
+            }
+        }
+
         return items
     }
 }
 
 // ---------------------------------------------------------------------------
-// PinayFlix Ã¢â‚¬â€ listing thumbs work; stream via mp4 in page / related uploads
+// PinayFlix — listing thumbs work; stream via mp4 in page / related uploads
 // ---------------------------------------------------------------------------
 
 class PinayFlixClient : VideoSourceClient {
@@ -1515,7 +1721,7 @@ class PinayFlixClient : VideoSourceClient {
                     streams = direct
                     break
                 }
-                // Playerjs packed config â†’ file: "https://â€¦m3u8?â€¦"
+                // Playerjs packed config → file: "https://…m3u8?…"
                 val unpacked = NetworkClient.unpackDeanEdwards(embHtml).orEmpty()
                 val fileUrl = NetworkClient.matchFirst(
                     unpacked,
@@ -1547,9 +1753,9 @@ class PinayFlixClient : VideoSourceClient {
             streams = streams,
             title = title,
             uploader = "PinayFlix",
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = "â€”",
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).filter { it.pageUrl != pageUrl }.take(18),
@@ -1637,13 +1843,14 @@ class BuumalClient : VideoSourceClient {
                 ?: NetworkClient.matchFirst(html, """<title>([^<]+)</title>""")
                 ?: "Video",
         ).substringBefore("|").trim()
-        var thumb = NetworkClient.matchFirst(html, """property="og:image"\s+content="([^"]+)"""")
-            .orEmpty()
+        // Watch page has no og:image — resolve cover via listing/search or R2 mp4 path.
+        var thumb = ThumbnailResolver.fromPage(pageUrl)
         if (thumb.isBlank()) {
-            thumb = NetworkClient.matchFirst(html, """src="(https?://img\.buumal\.com/[^"]+)"""")
-                .orEmpty()
+            thumb = NetworkClient.sanitizeMediaUrl(
+                NetworkClient.matchFirst(html, """property="og:image"\s+content="([^"]+)"""")
+                    .orEmpty(),
+            )
         }
-        thumb = NetworkClient.sanitizeMediaUrl(thumb)
         var streams = collectMp4AndHls(html, source.baseUrl)
             .map { s ->
                 s.copy(
@@ -1678,9 +1885,9 @@ class BuumalClient : VideoSourceClient {
             streams = streams,
             title = title,
             uploader = "Buumal",
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = "â€”",
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).take(12),
@@ -1701,19 +1908,21 @@ class BuumalClient : VideoSourceClient {
             val href = videoLinks.group(1) ?: continue
             val id = videoLinks.group(2) ?: continue
             if (!seen.add(id)) continue
+            // Img is inside the <a> after href; keep a wide window so long Unicode
+            // filenames still match.
             val window = html.substring(
-                (videoLinks.start() - 200).coerceAtLeast(0),
-                (videoLinks.start() + 900).coerceAtMost(html.length),
+                (videoLinks.start() - 100).coerceAtLeast(0),
+                (videoLinks.start() + 1400).coerceAtMost(html.length),
             )
-            val thumb = NetworkClient.sanitizeMediaUrl(
-                NetworkClient.matchFirst(
-                    window,
-                    """src="(https?://img\.buumal\.com/[^"]+)"""",
-                ) ?: NetworkClient.matchFirst(
-                    window,
-                    """(?:data-src|src)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
-                ).orEmpty(),
-            )
+            // Listing thumbs include spaces / Myanmar text — capture full attribute value.
+            val rawThumb = NetworkClient.matchFirst(
+                window,
+                """(?:data-src|src)="(https?://img\.buumal\.com/[^"]+)"""",
+            ) ?: NetworkClient.matchFirst(
+                window,
+                """(?:data-src|src)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
+            ).orEmpty()
+            val thumb = NetworkClient.sanitizeMediaUrl(rawThumb)
             // Titles live in <p> under card-content, not on img alt (alt is often "Buu Mal").
             val title = NetworkClient.decodeHtml(
                 NetworkClient.matchFirst(window, """class="content[^"]*"[^>]*>\s*<p>([^<]{2,})</p>""")
@@ -1770,9 +1979,9 @@ class BuumalClient : VideoSourceClient {
                     VideoItem(
                         id = id.ifBlank { thumb.hashCode().toUInt().toString() },
                         title = title.ifBlank { "Buumal video" },
-                        duration = "â€”",
+                        duration = "—",
                         resolution = "HD",
-                        views = "â€”",
+                        views = "—",
                         category = "Buumal",
                         gradientSeed = index++,
                         pageUrl = NetworkClient.absoluteUrl(source.baseUrl, href),
@@ -1788,29 +1997,42 @@ class BuumalClient : VideoSourceClient {
 }
 
 // ---------------------------------------------------------------------------
-// XxxTime / Siska-style listing
+// XBurma (Direct Myanmar Tube scraper)
 // ---------------------------------------------------------------------------
 
-class XxxTimeClient : VideoSourceClient {
-    override val source = VideoSource.XXXTIME
+class XBurmaClient : VideoSourceClient {
+    override val source = VideoSource.XBURMA
 
     override suspend fun fetchHomeVideos(page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
         val p = page.coerceAtLeast(1)
-        val url = if (p <= 1) {
-            "${source.baseUrl}/videos.php"
+        val paths = if (p <= 1) {
+            listOf("/", "/videos/", "/latest-updates/", "/most-recent/")
         } else {
-            "${source.baseUrl}/videos.php?page=$p"
+            listOf("/page/$p/", "/videos/page/$p/", "/latest-updates/$p/", "/?page=$p")
         }
-        parseListing(NetworkClient.get(url, source.baseUrl))
-            .ifEmpty {
-                if (p == 1) parseListing(NetworkClient.get(source.baseUrl + "/", source.baseUrl))
-                else emptyList()
+        val out = mutableListOf<VideoItem>()
+        val seen = mutableSetOf<String>()
+        for (path in paths) {
+            try {
+                val html = NetworkClient.get(source.baseUrl + path, source.baseUrl)
+                val items = parseListing(html)
+                for (item in items) {
+                    if (seen.add(item.id)) out.add(item)
+                }
+                if (out.size >= 12) break
+            } catch (_: Exception) {
             }
+        }
+        out
     }
 
-    override suspend fun search(query: String): List<VideoItem> = withContext(Dispatchers.IO) {
+    override suspend fun search(query: String): List<VideoItem> = search(query, 1)
+
+    override suspend fun search(query: String, page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
         val q = java.net.URLEncoder.encode(query.trim(), Charsets.UTF_8.name())
-        parseListing(NetworkClient.get("${source.baseUrl}/videos.php?search=$q", source.baseUrl))
+        val p = page.coerceAtLeast(1)
+        val url = if (p <= 1) "${source.baseUrl}/?s=$q" else "${source.baseUrl}/page/$p/?s=$q"
+        parseListing(NetworkClient.get(url, source.baseUrl))
     }
 
     override suspend fun fetchVideoDetails(pageUrl: String): VideoDetails = withContext(Dispatchers.IO) {
@@ -1818,129 +2040,108 @@ class XxxTimeClient : VideoSourceClient {
         val title = NetworkClient.decodeHtml(
             NetworkClient.matchFirst(html, """property="og:title"\s+content="([^"]+)"""")
                 ?: NetworkClient.matchFirst(html, """<title>([^<]+)</title>""")
-                ?: NetworkClient.matchFirst(html, """title='([^']+)'""")
                 ?: "Video",
-        ).trim()
+        ).substringBefore(" - XBurma").substringBefore(" | ").trim()
         val thumb = NetworkClient.matchFirst(html, """property="og:image"\s+content="([^"]+)"""")
             .orEmpty()
-        var streams = collectMp4AndHls(html, source.baseUrl)
-        var embedUrl: String? = null
-        // External player iframes (playmogo etc. may be Cloudflare-gated)
+        val streams = collectMp4AndHls(html, pageUrl)
         if (streams.isEmpty()) {
-            val iframe = Pattern.compile(
-                """iframe[^>]+src=["'](https?://[^"']+)["']""",
-                Pattern.CASE_INSENSITIVE,
-            ).matcher(html)
-            while (iframe.find() && streams.isEmpty()) {
-                val src = iframe.group(1) ?: continue
-                if (src.contains("googletag") || src.contains("doubleclick") || src.contains("/ad")) continue
-                embedUrl = src
-                try {
-                    streams = collectMp4AndHls(NetworkClient.get(src, pageUrl))
-                } catch (_: Exception) {
-                }
-            }
+            throw IllegalStateException("Video has been removed")
         }
-        if (streams.isEmpty()) {
-            embedUrl?.let { streams = listOf(StreamOption("Embed", it)) }
-        }
-        if (streams.isEmpty()) {
-            throw IllegalStateException("No playable stream on XxxTime")
-        }
+        val related = parseListing(html).filter { it.pageUrl != pageUrl }.take(18)
         VideoDetails(
             streamUrl = streams.first().url,
             streams = streams,
             title = title,
-            uploader = "XxxTime",
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = NetworkClient.matchFirst(html, """th_video_duration['"]?>([^<]+)<""")
-                ?: NetworkClient.matchFirst(html, """class="duration"[^>]*>([^<]+)<""")
-                ?: "â€”",
+            uploader = source.label,
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
-            related = parseListing(html).take(18),
+            related = related,
             thumbnailUrl = thumb,
-            embedUrl = if (streams.first().label == "Embed") embedUrl else null,
         )
     }
 
     private fun parseListing(html: String): List<VideoItem> {
-        val items = mutableListOf<VideoItem>()
+        val out = mutableListOf<VideoItem>()
         val seen = mutableSetOf<String>()
         var index = 0
-        // Current layout: video.php?v=ID + data-src thumb + alt title
-        val cards = Pattern.compile(
-            """href=['"]((?:https?://[^'"]*)?video\.php\?v=([A-Za-z0-9_-]+))['"][^>]*>[\s\S]{0,800}?data-src=['"]([^'"]+)['"][\s\S]{0,200}?alt=['"]([^'"]*)['"]""",
+
+        // Match all <a> tags with href and nearby img data-src/src
+        val pattern = Pattern.compile(
+            """<a\s+[^>]*href=["']((?:https?://[^"']*)?/[^"']+)["'][^>]*>[\s\S]{0,1000}?<img[^>]+(?:data-src|data-lazy-src|data-original|src)=["']([^"']+)["'][^>]*>""",
             Pattern.CASE_INSENSITIVE,
         ).matcher(html)
-        while (cards.find()) {
-            val href = cards.group(1) ?: continue
-            val id = cards.group(2) ?: continue
-            if (!seen.add(id)) continue
-            val thumb = cards.group(3).orEmpty()
-            val title = NetworkClient.decodeHtml(cards.group(4)?.ifBlank { null } ?: "Video $id")
-            val window = html.substring(
-                (cards.start() - 120).coerceAtLeast(0),
-                (cards.start() + 500).coerceAtMost(html.length),
-            )
-            val duration = NetworkClient.matchFirst(window, """th_video_duration['"]?>([^<]+)<""")
-                ?: "â€”"
-            items.add(
+
+        while (pattern.find()) {
+            val href = pattern.group(1) ?: continue
+            val thumb = pattern.group(2) ?: ""
+            if (href.contains("/category/") || href.contains("/tag/") || href.contains("/page/") || href.contains("#") || href.contains("javascript:")) continue
+            val fullUrl = NetworkClient.absoluteUrl(source.baseUrl, href)
+            val id = fullUrl.trimEnd('/').substringAfterLast('/')
+            if (id.length < 2 || !seen.add(id)) continue
+
+            val win = html.substring((pattern.start() - 100).coerceAtLeast(0), (pattern.end() + 600).coerceAtMost(html.length))
+            val title = NetworkClient.decodeHtml(
+                NetworkClient.matchFirst(win, """alt=["']([^"']{2,})["']""")
+                    ?: NetworkClient.matchFirst(win, """title=["']([^"']{2,})["']""")
+                    ?: NetworkClient.matchFirst(win, """<h[234][^>]*>\s*<a[^>]*>([^<]{2,})</a>""")
+                    ?: id.replace('-', ' ')
+            ).trim()
+
+            val duration = NetworkClient.matchFirst(win, """class="duration"[^>]*>([^<]+)<""")
+                ?: NetworkClient.matchFirst(win, """>(\d{1,2}:\d{2}(?::\d{2})?)</""")
+                ?: "—"
+
+            out.add(
                 VideoItem(
                     id = id,
                     title = title,
-                    duration = duration.trim(),
+                    duration = duration,
                     resolution = "HD",
-                    views = "â€”",
-                    category = "XxxTime",
+                    views = "—",
+                    category = source.label,
                     gradientSeed = index++,
-                    pageUrl = NetworkClient.absoluteUrl(source.baseUrl, href),
+                    pageUrl = fullUrl,
                     thumbnailUrl = thumb,
                     sourceId = source.id,
                 ),
             )
-            if (items.size >= 50) break
         }
-        if (items.isEmpty()) {
-            val loose = Pattern.compile(
-                """href=['"]((?:https?://[^'"]*)?video\.php\?v=([A-Za-z0-9_-]+))['"]""",
+
+        // Secondary fallback pattern for loose post links
+        if (out.isEmpty()) {
+            val m2 = Pattern.compile(
+                """href=["']((?:https?://[^"']*)?/[^"']+)["'][^>]*title=["']([^"']{3,})["']""",
                 Pattern.CASE_INSENSITIVE,
             ).matcher(html)
-            while (loose.find()) {
-                val href = loose.group(1) ?: continue
-                val id = loose.group(2) ?: continue
-                if (!seen.add(id)) continue
-                val window = html.substring(
-                    loose.start(),
-                    (loose.start() + 700).coerceAtMost(html.length),
-                )
-                val thumb = NetworkClient.matchFirst(
-                    window,
-                    """(?:data-src|src)=['"](https?://[^'"]+\.(?:jpg|jpeg|png|webp)[^'"]*)['"]""",
-                ).orEmpty()
-                val title = NetworkClient.decodeHtml(
-                    NetworkClient.matchFirst(window, """(?:alt|title)=['"]([^'"]+)['"]""")
-                        ?: "Video $id",
-                )
-                items.add(
-                    VideoItem(
-                        id = id,
-                        title = title,
-                        duration = "â€”",
-                        resolution = "HD",
-                        views = "â€”",
-                        category = "XxxTime",
-                        gradientSeed = index++,
-                        pageUrl = NetworkClient.absoluteUrl(source.baseUrl, href),
-                        thumbnailUrl = thumb,
-                        sourceId = source.id,
-                    ),
-                )
-                if (items.size >= 40) break
+            while (m2.find()) {
+                val href = m2.group(1) ?: continue
+                val title = NetworkClient.decodeHtml(m2.group(2) ?: "").trim()
+                if (href.contains("/category/") || href.contains("/tag/") || href.contains("/page/") || title.isBlank()) continue
+                val fullUrl = NetworkClient.absoluteUrl(source.baseUrl, href)
+                val id = fullUrl.trimEnd('/').substringAfterLast('/')
+                if (id.length >= 2 && seen.add(id)) {
+                    out.add(
+                        VideoItem(
+                            id = id,
+                            title = title,
+                            duration = "—",
+                            resolution = "HD",
+                            views = "—",
+                            category = source.label,
+                            gradientSeed = index++,
+                            pageUrl = fullUrl,
+                            thumbnailUrl = "",
+                            sourceId = source.id,
+                        ),
+                    )
+                }
             }
         }
-        return items
+        return out
     }
 }
 
@@ -2014,12 +2215,13 @@ class GenericTubeClient(
         val thumb = NetworkClient.matchFirst(html, """property="og:image"\s+content="([^"]+)"""")
             .orEmpty()
         var streams = collectMp4AndHls(html, source.baseUrl)
+            .filter { isPlayableTubeMedia(it.url) }
         if (streams.isEmpty()) {
             val iframe = NetworkClient.matchFirst(html, """iframe[^>]+src=["']([^"']+)["']""")
             if (!iframe.isNullOrBlank()) {
                 try {
                     val emb = NetworkClient.get(NetworkClient.absoluteUrl(pageUrl, iframe), pageUrl)
-                    streams = collectMp4AndHls(emb)
+                    streams = collectMp4AndHls(emb).filter { isPlayableTubeMedia(it.url) }
                 } catch (_: Exception) { }
             }
         }
@@ -2027,28 +2229,94 @@ class GenericTubeClient(
             val high = NetworkClient.matchFirst(html, """setVideoUrlHigh\(['"]([^'"]+)['"]\)""")
             val low = NetworkClient.matchFirst(html, """setVideoUrlLow\(['"]([^'"]+)['"]\)""")
             val hls = NetworkClient.matchFirst(html, """setVideoHLS\(['"]([^'"]+)['"]\)""")
-            streams = listOfNotNull(
-                high?.let { StreamOption("High", it) },
-                low?.let { StreamOption("Low", it) },
-                hls?.let { StreamOption("Auto", it) },
-            )
+            // KVS flashvars video_url / video_alt_url(N)
+            val flash = Pattern.compile(
+                """video(?:_alt)?_url(?:\d+)?\s*:\s*['"]([^'"]+)['"]""",
+                Pattern.CASE_INSENSITIVE,
+            ).matcher(html)
+            val flashUrls = mutableListOf<String>()
+            while (flash.find()) flash.group(1)?.let { flashUrls.add(it) }
+            streams = buildList {
+                high?.let { add(StreamOption(NetworkClient.guessQualityLabel(it, "High"), it)) }
+                low?.let { add(StreamOption(NetworkClient.guessQualityLabel(it, "Low"), it)) }
+                hls?.let { add(StreamOption("Auto", it)) }
+                for (u in flashUrls) {
+                    if (isPlayableTubeMedia(u)) {
+                        add(StreamOption(NetworkClient.guessQualityLabel(u, "MP4"), u))
+                    }
+                }
+            }
         }
+        // Prefer real get_file / CDN mp4s over cast.preview fluff; resolve redirects once.
+        streams = streams
+            .map { opt ->
+                var u = NetworkClient.sanitizeMediaUrl(opt.url)
+                if (u.contains("get_file", true) || u.contains("/videos/", true) && u.endsWith("/")) {
+                    u = try {
+                        NetworkClient.resolveFinalUrl(u, pageUrl)
+                    } catch (_: Exception) {
+                        u
+                    }
+                }
+                opt.copy(
+                    url = u,
+                    label = NetworkClient.guessQualityLabel(u, opt.label).ifBlank { opt.label },
+                )
+            }
+            .filter { isPlayableTubeMedia(it.url) }
+            .distinctBy { it.url }
+            // Prefer higher-bitrate get_file / CDN over cast.xxxfiles previews
+            .sortedByDescending { s ->
+                when {
+                    s.url.contains("get_file", true) || s.url.contains("ahcdn", true) -> 3
+                    s.url.contains("_720", true) || s.url.contains("720p", true) -> 2
+                    s.url.contains("_480", true) || s.url.contains("480p", true) -> 1
+                    s.url.contains("cast.", true) || s.url.contains("preview", true) -> -2
+                    else -> 0
+                }
+            }
+
         if (streams.isEmpty()) {
             throw IllegalStateException("No playable stream on ${source.label}")
         }
+        val related = parseListing(html)
+            .filter {
+                it.pageUrl != pageUrl &&
+                    it.title.isNotBlank() &&
+                    it.title.length >= 3
+            }
+            .take(18)
+        val labeled = expandMultiQualityStreams(streams)
+        val preferred = pickDefaultStream(labeled) ?: labeled.minByOrNull {
+            streamQualityRank(it.label).let { r -> if (r <= 1) 9999 else r }
+        } ?: labeled.first()
         VideoDetails(
-            streamUrl = streams.first().url,
-            streams = streams,
+            streamUrl = preferred.url,
+            streams = labeled,
             title = title,
             uploader = source.label,
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = NetworkClient.matchFirst(html, """class="duration"[^>]*>([^<]+)<""") ?: "â€”",
-            resolution = streams.first().label,
+            views = "—",
+            ratingPercent = "—",
+            duration = NetworkClient.matchFirst(html, """class="duration"[^>]*>([^<]+)<""") ?: "—",
+            resolution = preferred.label,
             tags = emptyList(),
-            related = parseListing(html).filter { it.pageUrl != pageUrl }.take(18),
+            related = related,
             thumbnailUrl = thumb,
         )
+    }
+
+    private fun isPlayableTubeMedia(url: String): Boolean {
+        if (url.isBlank()) return false
+        val u = url.lowercase()
+        if (u.contains("preview_480") || u.contains("preview_240")) return false
+        if (u.contains("_vthumb") || u.contains("trailer") && !u.contains("full")) return false
+        if (u.contains("cast.") && u.contains("preview")) return false
+        if (u.endsWith(".jpg") || u.endsWith(".jpeg") || u.endsWith(".png") || u.endsWith(".webp")) {
+            return false
+        }
+        // Reject false-positive "mp4.jpg" poster URLs
+        if (u.contains(".mp4.jpg") || u.contains(".mp4.png")) return false
+        return u.contains(".mp4") || u.contains(".m3u8") || u.contains("get_file")
     }
 
     private fun parseListing(html: String): List<VideoItem> {
@@ -2089,14 +2357,14 @@ class GenericTubeClient(
                 }
                 val duration = NetworkClient.matchFirst(windowAfter, """class="duration"[^>]*>([^<]+)<""")
                     ?: NetworkClient.matchFirst(windowAfter, """>(\d{1,2}:\d{2})</""")
-                    ?: "â€”"
+                    ?: "—"
                 items.add(
                     VideoItem(
                         id = id.removeSuffix(".html"),
                         title = title,
                         duration = duration.trim(),
                         resolution = "HD",
-                        views = "â€”",
+                        views = "—",
                         category = source.label,
                         gradientSeed = index++,
                         pageUrl = NetworkClient.absoluteUrl(source.baseUrl, href),
@@ -2113,7 +2381,7 @@ class GenericTubeClient(
 }
 
 // ---------------------------------------------------------------------------
-// JavFree.me â€” /id/code cards + direct CDN mp4
+// JavFree.me — /id/code cards + direct CDN mp4
 // ---------------------------------------------------------------------------
 
 class JavFreeClient : VideoSourceClient {
@@ -2160,6 +2428,17 @@ class JavFreeClient : VideoSourceClient {
             StreamOption(label, playUrl)
         }.distinctBy { it.url }
         if (streams.isEmpty()) {
+            // JavFree links only open premium file-host pages (ExtMatrix/tma.cx) — mirror the
+            // JAV code from XVideos, which reliably has the same title.
+            val code = Regex("""[A-Za-z]{2,6}-?\d{2,5}""").find(title)?.value
+            xvideosMirrorFallback(
+                title = title,
+                pageUrl = pageUrl,
+                source = source,
+                thumb = thumb,
+                related = parseListing(html).filter { it.pageUrl != pageUrl }.take(12),
+                extraQueries = listOfNotNull(code),
+            )?.let { return@withContext it }
             throw IllegalStateException(
                 "No playable stream on JavFree (links only open a premium file host page, not a video)",
             )
@@ -2169,6 +2448,7 @@ class JavFreeClient : VideoSourceClient {
             streams = streams,
             title = title,
             uploader = "JavFree",
+
             views = "—",
             ratingPercent = "—",
             duration = "—",
@@ -2269,7 +2549,7 @@ class JavFreeClient : VideoSourceClient {
 }
 
 // ---------------------------------------------------------------------------
-// 123AV â€” /en/v/slug listing + javplayer embed
+// 123AV — /en/v/slug listing + javplayer embed
 // ---------------------------------------------------------------------------
 
 class OneTwoThreeAvClient : VideoSourceClient {
@@ -2344,9 +2624,9 @@ class OneTwoThreeAvClient : VideoSourceClient {
             streams = streams,
             title = title,
             uploader = "123AV",
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = "â€”",
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).filter { it.pageUrl != pageUrl }.take(12),
@@ -2358,38 +2638,58 @@ class OneTwoThreeAvClient : VideoSourceClient {
     private fun parseListing(html: String): List<VideoItem> {
         val items = mutableListOf<VideoItem>()
         val seen = mutableSetOf<String>()
-        val m = Pattern.compile(
-            """href="((?:https?://123av\.com)?/en/v/([a-z0-9-]+))"""",
+        var index = 0
+
+        // Global id → cover map. Featured/title anchors are far from <img>; Alpine cards use :src.
+        // Covers look like: https://icdn.123av.me/img2/s360/{xx}/{id}/cover.jpg?...
+        val thumbById = HashMap<String, String>()
+        val coverRe = Pattern.compile(
+            """(https?://icdn\.123av\.[^"'\\\s]+/([a-z0-9-]+)/cover\.(?:jpg|jpeg|png|webp)[^"'\\\s]*)""",
             Pattern.CASE_INSENSITIVE,
         ).matcher(html)
-        var index = 0
-        while (m.find()) {
-            val path = m.group(1) ?: continue
-            val id = m.group(2) ?: continue
-            if (!seen.add(id)) continue
-            // Related cards use background-image on a sibling span after the link.
-            val window = html.substring(
-                (m.start() - 150).coerceAtLeast(0),
-                (m.start() + 900).coerceAtMost(html.length),
-            )
-            val thumb = NetworkClient.matchFirst(
+        while (coverRe.find()) {
+            val url = coverRe.group(1) ?: continue
+            val id = coverRe.group(2)?.lowercase() ?: continue
+            // Prefer smaller s360 over s500 when both exist (first wins is fine either way)
+            thumbById.putIfAbsent(id, url)
+        }
+        // vside background-image covers
+        val bgRe = Pattern.compile(
+            """background-image:url\(['"]?(https?://icdn\.123av\.[^"')]+/([a-z0-9-]+)/cover[^"')]+)""",
+            Pattern.CASE_INSENSITIVE,
+        ).matcher(html)
+        while (bgRe.find()) {
+            val url = bgRe.group(1) ?: continue
+            val id = bgRe.group(2)?.lowercase() ?: continue
+            thumbById.putIfAbsent(id, url)
+        }
+
+        fun thumbFor(id: String, window: String): String {
+            thumbById[id.lowercase()]?.let { return it }
+            return NetworkClient.matchFirst(
                 window,
-                """background-image:\s*url\(['"]?(https?://[^"')]+)""",
+                """(?:data-src|src)="(https?://icdn\.123av\.[^"]+)"""",
             ) ?: NetworkClient.matchFirst(
                 window,
-                """data-preview=["'](https?://[^"']+)["']""",
-            ) ?: NetworkClient.matchFirst(
-                window,
-                """(?:data-src|src)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
+                """background-image:url\(['"]?(https?://icdn\.123av\.[^"')]+)""",
             ).orEmpty()
-            val title = NetworkClient.decodeHtml(
-                NetworkClient.matchFirst(window, """(?:title|alt)="([^"]{2,})"""")
-                    ?: id.uppercase(),
-            )
-            val duration = NetworkClient.matchFirst(
-                window,
-                """vside__dur[^>]*>([^<]+)<""",
-            ) ?: NetworkClient.matchFirst(window, """>(\d{1,2}:\d{2}(?::\d{2})?)<""")
+        }
+
+        fun add(
+            path: String,
+            id: String,
+            titleRaw: String,
+            window: String,
+        ) {
+            if (!seen.add(id)) return
+            val title = NetworkClient.decodeHtml(titleRaw)
+                .replace(Regex("""\s+"""), " ")
+                .trim()
+                .ifBlank { id.uppercase() }
+            // Skip Alpine.js empty shells (x-text filled client-side)
+            if (title.equals("item.label", true) || title.isBlank()) return
+            val duration = NetworkClient.matchFirst(window, """class="(?:card|featured|vside)__dur"[^>]*>([^<]+)<""")
+                ?: NetworkClient.matchFirst(window, """>(\d{1,2}:\d{2}(?::\d{2})?)<""")
                 ?: "—"
             items.add(
                 VideoItem(
@@ -2401,18 +2701,88 @@ class OneTwoThreeAvClient : VideoSourceClient {
                     category = "123AV",
                     gradientSeed = index++,
                     pageUrl = NetworkClient.absoluteUrl(source.baseUrl, path),
-                    thumbnailUrl = thumb,
+                    thumbnailUrl = thumbFor(id, window),
                     sourceId = source.id,
                 ),
             )
-            if (items.size >= 48) break
+        }
+
+        // 1) Main grid: <h3 class="card__title"><a href="/en/v/id">Title</a>
+        val cardTitle = Pattern.compile(
+            """class="card__title"[^>]*>\s*<a[^>]+href="((?:https?://123av\.(?:com|me))?/en/v/([a-z0-9-]+))"[^>]*>([^<]+)</a>""",
+            Pattern.CASE_INSENSITIVE,
+        ).matcher(html)
+        while (cardTitle.find()) {
+            val path = cardTitle.group(1) ?: continue
+            val id = cardTitle.group(2) ?: continue
+            val window = html.substring(
+                (cardTitle.start() - 900).coerceAtLeast(0),
+                (cardTitle.start() + 200).coerceAtMost(html.length),
+            )
+            add(path, id, cardTitle.group(3).orEmpty(), window)
+            if (items.size >= 60) return items
+        }
+
+        // 2) Featured swiper: <a href="/en/v/id"><h2 class="featured__title">Title</h2>
+        val featured = Pattern.compile(
+            """href="((?:https?://123av\.(?:com|me))?/en/v/([a-z0-9-]+))"[^>]*>\s*<h2 class="featured__title">([^<]+)</h2>""",
+            Pattern.CASE_INSENSITIVE,
+        ).matcher(html)
+        while (featured.find()) {
+            val path = featured.group(1) ?: continue
+            val id = featured.group(2) ?: continue
+            val window = html.substring(
+                (featured.start() - 1200).coerceAtLeast(0),
+                (featured.start() + 300).coerceAtMost(html.length),
+            )
+            add(path, id, featured.group(3).orEmpty(), window)
+            if (items.size >= 60) return items
+        }
+
+        // 3) Related / sidebar: vside__title
+        val vside = Pattern.compile(
+            """href="((?:https?://123av\.(?:com|me))?/en/v/([a-z0-9-]+))"[^>]*>[\s\S]{0,500}?class="vside__title">([^<]+)""",
+            Pattern.CASE_INSENSITIVE,
+        ).matcher(html)
+        while (vside.find()) {
+            val path = vside.group(1) ?: continue
+            val id = vside.group(2) ?: continue
+            val window = html.substring(
+                vside.start(),
+                (vside.start() + 600).coerceAtMost(html.length),
+            )
+            add(path, id, vside.group(3).orEmpty(), window)
+            if (items.size >= 60) return items
+        }
+
+        // 4) Remaining ids that only appear as poster/href — still attach mapped thumbs
+        if (items.size < 30) {
+            val m = Pattern.compile(
+                """href="((?:https?://123av\.(?:com|me))?/en/v/([a-z0-9-]+))"""",
+                Pattern.CASE_INSENSITIVE,
+            ).matcher(html)
+            while (m.find()) {
+                val path = m.group(1) ?: continue
+                val id = m.group(2) ?: continue
+                if (seen.contains(id)) continue
+                val window = html.substring(
+                    (m.start() - 200).coerceAtLeast(0),
+                    (m.start() + 900).coerceAtMost(html.length),
+                )
+                val nearTitle = NetworkClient.matchFirst(
+                    window,
+                    """(?:card__title|featured__title|vside__title)[^>]*>(?:<a[^>]*>)?([^<]{3,})""",
+                ) ?: id.uppercase()
+                add(path, id, nearTitle, window)
+                if (items.size >= 60) break
+            }
         }
         return items
     }
 }
 
 // ---------------------------------------------------------------------------
-// JavSeen â€” category/list pages
+// JavSeen — category/list pages
 // ---------------------------------------------------------------------------
 
 class JavSeenClient : VideoSourceClient {
@@ -2422,13 +2792,26 @@ class JavSeenClient : VideoSourceClient {
 
     override suspend fun fetchHomeVideos(page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
         val p = page.coerceAtLeast(1)
-        val url = if (p <= 1) "$listBase/" else "$listBase/?page=$p"
-        parseListing(NetworkClient.get(url, listBase))
-            .ifEmpty {
-                // fall back to main domain category pages
-                parseListing(NetworkClient.get("https://javseen.tv/", source.baseUrl))
+        // Prefer new-release / category feeds (less sticky sidebar dupes than bare /?page=).
+        val urls = if (p <= 1) {
+            listOf("$listBase/", "$listBase/new-release/", "https://javseen.tv/")
+        } else {
+            listOf(
+                "$listBase/?page=$p",
+                "$listBase/new-release/?page=$p",
+                "$listBase/page/$p/",
+            )
+        }
+        var last = emptyList<VideoItem>()
+        for (url in urls) {
+            try {
+                val items = parseListing(NetworkClient.get(url, listBase), page = p)
+                if (items.isNotEmpty()) return@withContext items
+                last = items
+            } catch (_: Exception) {
             }
-            .ifEmpty { throw IllegalStateException("Could not load JavSeen") }
+        }
+        last.ifEmpty { throw IllegalStateException("Could not load JavSeen") }
     }
 
     override suspend fun search(query: String): List<VideoItem> = withContext(Dispatchers.IO) {
@@ -2468,9 +2851,9 @@ class JavSeenClient : VideoSourceClient {
             streams = streams,
             title = title,
             uploader = "JavSeen",
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = "â€”",
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).filter { it.pageUrl != pageUrl }.take(12),
@@ -2479,24 +2862,24 @@ class JavSeenClient : VideoSourceClient {
         )
     }
 
-    private fun parseListing(html: String): List<VideoItem> {
+    private fun parseListing(html: String, page: Int = 1): List<VideoItem> {
         val items = mutableListOf<VideoItem>()
         val seen = mutableSetOf<String>()
-        // <li id="video-282208"> â€¦ href="/282208/slug/" â€¦ <img src="https://pics.javseenz.tv/...">
-        val re = Pattern.compile(
-            """href="((?:https?://javseenz?\.tv)?/(\d{4,})/([^"]+)/?)"[\s\S]{0,500}?src="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
+        var index = 0
+        // Prefer li#video-{id} blocks (main grid). Sidebar/featured also uses plain hrefs.
+        val cardRe = Pattern.compile(
+            """id="video-(\d+)"[\s\S]{0,1200}?href="((?:https?://javseenz?\.tv)?/\1/([^"]+)/?)"[\s\S]{0,600}?src="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
             Pattern.CASE_INSENSITIVE,
         ).matcher(html)
-        var index = 0
-        while (re.find()) {
-            val path = re.group(1) ?: continue
-            val id = re.group(2) ?: continue
+        while (cardRe.find()) {
+            val id = cardRe.group(1) ?: continue
             if (!seen.add(id)) continue
-            val slug = re.group(3).orEmpty()
-            val thumb = re.group(4).orEmpty()
+            val path = cardRe.group(2) ?: continue
+            val slug = cardRe.group(3).orEmpty()
+            val thumb = cardRe.group(4).orEmpty()
             val window = html.substring(
-                (re.start() - 80).coerceAtLeast(0),
-                (re.start() + 400).coerceAtMost(html.length),
+                (cardRe.start() - 40).coerceAtLeast(0),
+                (cardRe.start() + 500).coerceAtMost(html.length),
             )
             val title = NetworkClient.decodeHtml(
                 NetworkClient.matchFirst(window, """title="([^"]{2,})"""")
@@ -2507,9 +2890,9 @@ class JavSeenClient : VideoSourceClient {
                 VideoItem(
                     id = id,
                     title = title,
-                    duration = "â€”",
+                    duration = "—",
                     resolution = "HD",
-                    views = "â€”",
+                    views = "—",
                     category = "JavSeen",
                     gradientSeed = index++,
                     pageUrl = NetworkClient.absoluteUrl(listBase, path),
@@ -2519,12 +2902,54 @@ class JavSeenClient : VideoSourceClient {
             )
             if (items.size >= 48) break
         }
+        if (items.isEmpty()) {
+            val re = Pattern.compile(
+                """href="((?:https?://javseenz?\.tv)?/(\d{4,})/([^"]+)/?)"[\s\S]{0,500}?src="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
+                Pattern.CASE_INSENSITIVE,
+            ).matcher(html)
+            while (re.find()) {
+                val path = re.group(1) ?: continue
+                val id = re.group(2) ?: continue
+                if (!seen.add(id)) continue
+                val slug = re.group(3).orEmpty()
+                val thumb = re.group(4).orEmpty()
+                items.add(
+                    VideoItem(
+                        id = id,
+                        title = slug.replace('-', ' '),
+                        duration = "—",
+                        resolution = "HD",
+                        views = "—",
+                        category = "JavSeen",
+                        gradientSeed = index++,
+                        pageUrl = NetworkClient.absoluteUrl(listBase, path),
+                        thumbnailUrl = thumb,
+                        sourceId = source.id,
+                    ),
+                )
+                if (items.size >= 48) break
+            }
+        }
+        // Page 2+ still embeds "hot" strip of newest IDs at the top — drop a small
+        // head chunk that repeats page-1 featured items when we already have many.
+        if (page > 1 && items.size > 16) {
+            val head = items.take(8).map { it.id }.toSet()
+            val tail = items.drop(8)
+            // If head ids look contiguous-high (featured), prefer rest of list.
+            if (tail.isNotEmpty()) {
+                val headMax = head.mapNotNull { it.toLongOrNull() }.maxOrNull() ?: 0L
+                val tailMax = tail.mapNotNull { it.id.toLongOrNull() }.maxOrNull() ?: 0L
+                if (headMax >= tailMax) {
+                    return tail
+                }
+            }
+        }
         return items
     }
 }
 
 // ---------------------------------------------------------------------------
-// BabeXTube (Myanmar) â€” /mm-porn/ slugs + sub.babextube.com mp4
+// BabeXTube (Myanmar) — /mm-porn/ slugs + sub.babextube.com mp4
 // ---------------------------------------------------------------------------
 
 class BabeXTubeClient : VideoSourceClient {
@@ -2559,9 +2984,9 @@ class BabeXTubeClient : VideoSourceClient {
             streams = streams,
             title = title,
             uploader = "BabeXTube",
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = "â€”",
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).filter { it.pageUrl != pageUrl }.take(12),
@@ -2591,9 +3016,9 @@ class BabeXTubeClient : VideoSourceClient {
                 VideoItem(
                     id = slug.hashCode().toUInt().toString(),
                     title = title.ifBlank { "BabeXTube video" },
-                    duration = "â€”",
+                    duration = "—",
                     resolution = "HD",
-                    views = "â€”",
+                    views = "—",
                     category = "BabeXTube",
                     gradientSeed = index++,
                     pageUrl = href,
@@ -2608,7 +3033,7 @@ class BabeXTubeClient : VideoSourceClient {
 }
 
 // ---------------------------------------------------------------------------
-// BebasIndo â€” /video/slug listing + /api/iframe player
+// BebasIndo — /video/slug listing + /api/iframe player
 // ---------------------------------------------------------------------------
 
 class BebasIndoClient : VideoSourceClient {
@@ -2616,21 +3041,48 @@ class BebasIndoClient : VideoSourceClient {
 
     override suspend fun fetchHomeVideos(page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
         val p = page.coerceAtLeast(1)
-        val url = if (p <= 1) {
-            "${source.baseUrl}/category/indonesia/"
+        val urls = if (p <= 1) {
+            listOf(
+                "${source.baseUrl}/category/indonesia/",
+                "${source.baseUrl}/",
+                "${source.baseUrl}/category/terbaru/",
+            )
         } else {
-            "${source.baseUrl}/category/indonesia/page/$p/"
+            listOf(
+                "${source.baseUrl}/category/indonesia/page/$p/",
+                "${source.baseUrl}/page/$p/",
+                "${source.baseUrl}/category/terbaru/page/$p/",
+                "${source.baseUrl}/category/indonesia/?page=$p",
+            )
         }
-        parseListing(NetworkClient.get(url, source.baseUrl))
-            .ifEmpty {
-                if (p == 1) parseListing(NetworkClient.get(source.baseUrl + "/", source.baseUrl))
-                else emptyList()
+        for (url in urls) {
+            try {
+                val items = parseListing(NetworkClient.get(url, source.baseUrl))
+                if (items.isNotEmpty()) return@withContext items
+            } catch (_: Exception) {
             }
+        }
+        emptyList()
     }
 
-    override suspend fun search(query: String): List<VideoItem> = withContext(Dispatchers.IO) {
+    override suspend fun search(query: String): List<VideoItem> = search(query, 1)
+
+    override suspend fun search(query: String, page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
         val q = java.net.URLEncoder.encode(query.trim(), Charsets.UTF_8.name())
-        parseListing(NetworkClient.get("${source.baseUrl}/?s=$q", source.baseUrl))
+        val p = page.coerceAtLeast(1)
+        val urls = if (p <= 1) {
+            listOf("${source.baseUrl}/?s=$q", "${source.baseUrl}/search/$q/")
+        } else {
+            listOf("${source.baseUrl}/page/$p/?s=$q", "${source.baseUrl}/?s=$q&paged=$p")
+        }
+        for (url in urls) {
+            try {
+                val items = parseListing(NetworkClient.get(url, source.baseUrl))
+                if (items.isNotEmpty()) return@withContext items
+            } catch (_: Exception) {
+            }
+        }
+        emptyList()
     }
 
     override suspend fun fetchVideoDetails(pageUrl: String): VideoDetails = withContext(Dispatchers.IO) {
@@ -2685,9 +3137,9 @@ class BebasIndoClient : VideoSourceClient {
             streams = streams,
             title = title,
             uploader = "BebasIndo",
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = "â€”",
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).filter { it.pageUrl != pageUrl }.take(12),
@@ -2724,9 +3176,9 @@ class BebasIndoClient : VideoSourceClient {
                 VideoItem(
                     id = id,
                     title = title,
-                    duration = "â€”",
+                    duration = "—",
                     resolution = "HD",
-                    views = "â€”",
+                    views = "—",
                     category = "BebasIndo",
                     gradientSeed = index++,
                     pageUrl = href,
@@ -2741,7 +3193,7 @@ class BebasIndoClient : VideoSourceClient {
 }
 
 // ---------------------------------------------------------------------------
-// NontonBokep â€” slug cards + base64 iframe â†’ CDN mp4
+// NontonBokep — slug cards + base64 iframe → CDN mp4
 // ---------------------------------------------------------------------------
 
 class NontonBokepClient : VideoSourceClient {
@@ -2769,45 +3221,91 @@ class NontonBokepClient : VideoSourceClient {
         val thumb = NetworkClient.matchFirst(html, """property="og:image"\s+content="([^"]+)"""")
             .orEmpty()
         var streams = collectMp4AndHls(html, source.baseUrl)
-        // iframe src is often base64 of embed host
-        val iframe = NetworkClient.matchFirst(html, """iframe[^>]+src=["']([^"']+)["']""")
-        if (streams.isEmpty() && !iframe.isNullOrBlank()) {
-            val embed = decodeMaybeBase64Url(iframe)
+        // iframe src is often base64 of embed host (303in.top / 200cdn)
+        val iframeRe = Pattern.compile(
+            """iframe[^>]+src=["']([^"']+)["']""",
+            Pattern.CASE_INSENSITIVE,
+        ).matcher(html)
+        val embeds = mutableListOf<String>()
+        while (iframeRe.find()) {
+            val raw = iframeRe.group(1) ?: continue
+            if (raw.contains("ad.") || raw.contains("a-ads") || raw.contains("googletag")) continue
+            embeds.add(decodeMaybeBase64Url(raw))
+        }
+        for (embed in embeds.distinct()) {
+            if (!embed.startsWith("http")) continue
             try {
-                if (embed.endsWith(".mp4", true) || embed.contains(".mp4?")) {
-                    streams = listOf(StreamOption("MP4", embed))
-                } else {
-                    val embHtml = NetworkClient.get(embed, pageUrl)
-                    streams = collectMp4AndHls(embHtml, embed)
-                    if (streams.isEmpty()) {
-                        // try common CDN pattern from decoded host + id
-                        val id = embed.trimEnd('/').substringAfterLast('/')
-                        val guess = "https://embed.200cdn.top/$id.mp4"
-                        streams = listOf(StreamOption("MP4", guess))
+                if (embed.contains(".mp4", true)) {
+                    streams = listOf(StreamOption("MP4", embed)) + streams
+                    break
+                }
+                val dood = resolveDoodStreamEmbed(embed, pageUrl)
+                if (dood.isNotEmpty()) {
+                    streams = dood
+                    break
+                }
+                val embHtml = NetworkClient.get(embed, pageUrl)
+                var nested = collectMp4AndHls(embHtml, embed)
+                // FluidPlayer / source src=
+                if (nested.isEmpty()) {
+                    val srcTag = Pattern.compile(
+                        """<source[^>]+src=["'](https?://[^"']+)["']""",
+                        Pattern.CASE_INSENSITIVE,
+                    ).matcher(embHtml)
+                    while (srcTag.find()) {
+                        val u = srcTag.group(1) ?: continue
+                        nested = listOf(StreamOption(if (u.contains("m3u8")) "Auto (HLS)" else "MP4", u))
                     }
                 }
-            } catch (_: Exception) {
-                if (embed.startsWith("http")) {
-                    streams = listOf(StreamOption("Embed", embed))
+                if (nested.isEmpty()) {
+                    val id = embed.trimEnd('/').substringAfterLast('/').substringBefore('?')
+                    if (id.all { it.isDigit() } && id.length >= 6) {
+                        nested = listOf(
+                            "https://embed.200cdn.top/$id.mp4",
+                        ).map { StreamOption("MP4", it) }
+                    }
                 }
+                if (nested.isNotEmpty()) {
+                    streams = nested
+                    break
+                }
+            } catch (_: Exception) {
             }
         }
+        // embed.200cdn.top only redirects to static.*.id.200cdn.top with playto.303in.top referer.
+        // Without resolve + correct referer ExoPlayer gets 403/404.
+        streams = streams
+            .map { opt ->
+                val clean = NetworkClient.sanitizeMediaUrl(opt.url)
+                val resolved = try {
+                    if (clean.contains("200cdn", true) || clean.contains("303in", true)) {
+                        NetworkClient.resolveFinalUrl(clean, "https://playto.303in.top/")
+                    } else {
+                        clean
+                    }
+                } catch (_: Exception) {
+                    clean
+                }
+                opt.copy(url = resolved)
+            }
+            .distinctBy { it.url }
+            .filter { !it.label.equals("Embed", true) }
         if (streams.isEmpty()) {
-            throw IllegalStateException("No stream on NontonBokep")
+            throw IllegalStateException("No stream on NontonBokep (CDN may block this network)")
         }
         VideoDetails(
             streamUrl = streams.first().url,
             streams = streams,
             title = title,
             uploader = "NontonBokep",
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = "â€”",
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).filter { it.pageUrl != pageUrl }.take(12),
             thumbnailUrl = thumb,
-            embedUrl = if (streams.first().label == "Embed") streams.first().url else null,
+            embedUrl = null,
         )
     }
 
@@ -2840,9 +3338,9 @@ class NontonBokepClient : VideoSourceClient {
                 VideoItem(
                     id = id,
                     title = NetworkClient.decodeHtml(title).ifBlank { id },
-                    duration = "â€”",
+                    duration = "—",
                     resolution = "HD",
-                    views = "â€”",
+                    views = "—",
                     category = "NontonBokep",
                     gradientSeed = index++,
                     pageUrl = href,
@@ -2864,9 +3362,9 @@ class NontonBokepClient : VideoSourceClient {
                     VideoItem(
                         id = id,
                         title = id.replace('-', ' '),
-                        duration = "â€”",
+                        duration = "—",
                         resolution = "HD",
-                        views = "â€”",
+                        views = "—",
                         category = "NontonBokep",
                         gradientSeed = index++,
                         pageUrl = href,
@@ -3304,7 +3802,7 @@ class SexHay24hClient : VideoSourceClient {
 }
 
 // ---------------------------------------------------------------------------
-// PornKai ï¿½ aggregates XVideos / TXXX embeds via /view?key=
+// PornKai — aggregates XVideos / TXXX embeds via /view?key=
 // ---------------------------------------------------------------------------
 
 class PornKaiClient : VideoSourceClient {
@@ -3385,13 +3883,27 @@ class PornKaiClient : VideoSourceClient {
                 streams = listOf(StreamOption("Embed", embUrl)) + streams
             }
         }
-        streams = streams.distinctBy { it.url }
-        if (streams.isEmpty()) throw IllegalStateException("No playable stream on PornKai")
+        // Keep only real media URLs; a bare xvideos/txxx embed page URL is not playable
+        // by ExoPlayer, so drop "Embed" placeholders and mirror from XVideos instead.
+        streams = streams
+            .filter { !it.label.equals("Embed", true) }
+            .distinctBy { it.url }
+        if (streams.isEmpty()) {
+            xvideosMirrorFallback(
+                title = title,
+                pageUrl = pageUrl,
+                source = source,
+                thumb = thumb,
+                related = parseListing(html).filter { it.pageUrl != pageUrl }.take(16),
+            )?.let { return@withContext it }
+            throw IllegalStateException("No playable stream on PornKai")
+        }
         VideoDetails(
             streamUrl = streams.first().url,
             streams = streams,
             title = title.ifBlank { "PornKai" },
             uploader = "PornKai",
+
             views = "—",
             ratingPercent = "—",
             duration = "—",
@@ -3509,7 +4021,7 @@ class PornKaiClient : VideoSourceClient {
 }
 
 // ---------------------------------------------------------------------------
-// ThaiPornTV ï¿½ data-enc XOR-17 ? techvids HLS
+// ThaiPornTV — data-enc XOR-17 ? techvids HLS
 // ---------------------------------------------------------------------------
 
 class ThaiPornTvClient : VideoSourceClient {
@@ -3569,9 +4081,9 @@ class ThaiPornTvClient : VideoSourceClient {
             streams = streams.distinctBy { it.url },
             title = title,
             uploader = "ThaiPornTV",
-            views = "ï¿½",
-            ratingPercent = "ï¿½",
-            duration = "ï¿½",
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).filter { it.pageUrl != pageUrl }.take(14),
@@ -3653,9 +4165,9 @@ class ThaiPornTvClient : VideoSourceClient {
                 VideoItem(
                     id = id,
                     title = title,
-                    duration = "ï¿½",
+                    duration = "—",
                     resolution = "HD",
-                    views = "ï¿½",
+                    views = "—",
                     category = "ThaiPornTV",
                     gradientSeed = index++,
                     pageUrl = NetworkClient.absoluteUrl(source.baseUrl, path),
@@ -3670,7 +4182,7 @@ class ThaiPornTvClient : VideoSourceClient {
 }
 
 // ---------------------------------------------------------------------------
-// iXXX ï¿½ tube search aggregator (mobile UA; falls back to Thai XVideos feed)
+// iXXX — tube search aggregator (mobile UA; falls back to Thai XVideos feed)
 // ---------------------------------------------------------------------------
 
 class IxxxClient : VideoSourceClient {
@@ -3687,7 +4199,7 @@ class IxxxClient : VideoSourceClient {
             if (items.isNotEmpty()) return@withContext items
         } catch (_: Exception) {
         }
-        // Cloudflare often challenges desktop scrapers ï¿½ use XVideos Thai results rebranded.
+        // Cloudflare often challenges desktop scrapers — use XVideos Thai results rebranded.
         xvFallback.search("thai", page).map { it.copy(sourceId = source.id, category = "iXXX") }
     }
 
@@ -3754,9 +4266,9 @@ class IxxxClient : VideoSourceClient {
             streams = streams,
             title = title,
             uploader = "iXXX",
-            views = "ï¿½",
-            ratingPercent = "ï¿½",
-            duration = "ï¿½",
+            views = "—",
+            ratingPercent = "—",
+            duration = "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).take(12),
@@ -3795,9 +4307,9 @@ class IxxxClient : VideoSourceClient {
                     VideoItem(
                         id = id,
                         title = title,
-                        duration = "ï¿½",
+                        duration = "—",
                         resolution = "HD",
-                        views = "ï¿½",
+                        views = "—",
                         category = "iXXX",
                         gradientSeed = index++,
                         pageUrl = NetworkClient.absoluteUrl(source.baseUrl, href),

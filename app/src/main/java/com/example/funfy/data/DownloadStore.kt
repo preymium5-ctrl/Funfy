@@ -39,8 +39,38 @@ import kotlin.coroutines.coroutineContext
 class DownloadStore(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private val videosDir = File(appContext.filesDir, "videos").also { it.mkdirs() }
-    private val thumbsDir = File(appContext.filesDir, "thumbs").also { it.mkdirs() }
+    private val videosDir: File
+        get() {
+            val publicMovies = File(
+                android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES),
+                "Funfy",
+            )
+            if (publicMovies.exists() || publicMovies.mkdirs()) {
+                return publicMovies
+            }
+            val extFiles = appContext.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES)
+            if (extFiles != null && (extFiles.exists() || extFiles.mkdirs())) {
+                return extFiles
+            }
+            return File(appContext.filesDir, "videos").also { it.mkdirs() }
+        }
+
+    private val thumbsDir: File
+        get() {
+            val publicPictures = File(
+                android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_PICTURES),
+                "Funfy",
+            )
+            if (publicPictures.exists() || publicPictures.mkdirs()) {
+                return publicPictures
+            }
+            val extFiles = appContext.getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES)
+            if (extFiles != null && (extFiles.exists() || extFiles.mkdirs())) {
+                return extFiles
+            }
+            return File(appContext.filesDir, "thumbs").also { it.mkdirs() }
+        }
+
     private val mutationLock = Any()
     private val downloadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = ConcurrentHashMap<String, Job>()
@@ -56,6 +86,9 @@ class DownloadStore(context: Context) {
     private val _transfers = MutableStateFlow<List<DownloadTransfer>>(emptyList())
     val transfers: StateFlow<List<DownloadTransfer>> = _transfers.asStateFlow()
 
+    private val _folders = MutableStateFlow(loadFolders())
+    val folders: StateFlow<List<MediaFolder>> = _folders.asStateFlow()
+
     init {
         // A process can be killed while a file is being written. Those files
         // were never registered and are intentionally never resumed as if they
@@ -66,8 +99,67 @@ class DownloadStore(context: Context) {
         thumbsDir.listFiles()
             ?.filter { it.name.endsWith(PART_SUFFIX) }
             ?.forEach { safeDeleteOwned(it, thumbsDir) }
-        // Also prune metadata for files removed by the OS/user.
-        saveAll(_downloads.value)
+        restoreFromDurableIfNeeded()
+        // Auto-relink local files if app was uninstalled/reinstalled:
+        val relinked = _downloads.value.map { d ->
+            val currentFile = File(d.filePath)
+            if (currentFile.isFile && currentFile.length() > 0L) {
+                d
+            } else {
+                val baseName = currentFile.name
+                val candidatePublic = File(videosDir, baseName)
+                if (candidatePublic.isFile && candidatePublic.length() > 0L) {
+                    d.copy(filePath = candidatePublic.absolutePath)
+                } else {
+                    d
+                }
+            }
+        }
+        // Keep title/list metadata after reinstall so the download history survives.
+        val kept = relinked.filter { d ->
+            val fileOk = runCatching { File(d.filePath).isFile && File(d.filePath).length() > 0L }.getOrDefault(false)
+            fileOk || d.title.isNotBlank()
+        }
+        if (kept.size != _downloads.value.size) {
+            saveAll(kept)
+            _downloads.value = kept
+        } else {
+            // Refresh durable snapshot for current data.
+            persistDurable()
+        }
+    }
+
+    fun createFolder(name: String): MediaFolder? {
+        val clean = name.trim().take(48)
+        if (clean.isBlank()) return null
+        if (_folders.value.any { it.name.equals(clean, ignoreCase = true) }) {
+            return _folders.value.first { it.name.equals(clean, ignoreCase = true) }
+        }
+        val folder = MediaFolder(id = UUID.randomUUID().toString(), name = clean)
+        val next = (_folders.value + folder).sortedBy { it.name.lowercase() }
+        saveFolders(next)
+        _folders.value = next
+        return folder
+    }
+
+    fun deleteFolder(folderId: String) {
+        val nextFolders = _folders.value.filterNot { it.id == folderId }
+        saveFolders(nextFolders)
+        _folders.value = nextFolders
+        val nextDownloads = _downloads.value.map { d ->
+            if (d.folderId == folderId) d.copy(folderId = null) else d
+        }
+        saveAll(nextDownloads)
+        _downloads.value = nextDownloads
+    }
+
+    fun moveToFolder(id: String, folderId: String?) {
+        val target = folderId?.takeIf { fid -> _folders.value.any { it.id == fid } }
+        val next = _downloads.value.map { d ->
+            if (d.id == id) d.copy(folderId = target) else d
+        }
+        saveAll(next)
+        _downloads.value = next
     }
 
     fun getAll(): List<LocalDownload> = _downloads.value
@@ -88,6 +180,7 @@ class DownloadStore(context: Context) {
         duration: String,
         thumbnailUrl: String,
         referer: String,
+        folderId: String? = null,
         onProgress: (Float) -> Unit = {},
     ): String {
         val id = UUID.randomUUID().toString()
@@ -98,6 +191,7 @@ class DownloadStore(context: Context) {
             duration = duration,
             thumbnailUrl = thumbnailUrl,
             referer = referer,
+            folderId = folderId?.takeIf { fid -> _folders.value.any { it.id == fid } },
         )
         requests[id] = request
         publishQueued(id, request)
@@ -126,6 +220,7 @@ class DownloadStore(context: Context) {
             duration = duration,
             thumbnailUrl = thumbnailUrl,
             referer = referer,
+            folderId = null,
         )
         requests[downloadId] = request
         publishQueued(downloadId, request)
@@ -363,6 +458,7 @@ class DownloadStore(context: Context) {
                 sizeBytes = sizeBytes,
                 completedAt = System.currentTimeMillis(),
                 storagePath = storageRoot.absolutePath,
+                folderId = request.folderId,
             )
             registerCompleted(id, entry)
             workingPaths.remove(id)
@@ -773,24 +869,32 @@ class DownloadStore(context: Context) {
                     val o = arr.getJSONObject(i)
                     val path = o.optString("filePath")
                     val playable = File(path)
-                    if (path.isBlank() || !playable.isFile || playable.length() <= 0L) continue
                     val storagePath = o.optString("storagePath", path)
                     val storage = File(storagePath)
-                    if (!storage.exists()) continue
+                    val fileOk = path.isNotBlank() && playable.isFile && playable.length() > 0L
+                    val folderRaw = o.optString("folderId", "")
+                    val title = o.optString("title").ifBlank { "Offline video" }
+                    // Keep catalog rows after reinstall even when private files are gone.
+                    if (!fileOk && title.isBlank()) continue
                     add(
                         LocalDownload(
                             id = o.optString("id").ifBlank { UUID.randomUUID().toString() },
-                            title = o.optString("title").ifBlank { "Offline video" },
-                            filePath = playable.absolutePath,
-                            thumbnailPath = o.optString("thumbnailPath"),
-                            thumbnailUrl = o.optString("thumbnailUrl"),
+                            title = title,
+                            filePath = if (fileOk) playable.absolutePath else path,
+                            thumbnailPath = o.optString("thumbnailPath").takeIf {
+                                it.isNotBlank() && File(it).isFile
+                            }.orEmpty(),
+                            thumbnailUrl = NetworkClient.sanitizeMediaUrl(
+                                o.optString("thumbnailUrl"),
+                            ),
                             duration = o.optString("duration", "—"),
                             resolution = o.optString("resolution", "HD"),
                             sizeBytes = o.optLong("sizeBytes").takeIf { it > 0L }
-                                ?: directorySize(storage),
+                                ?: if (fileOk && storage.exists()) directorySize(storage) else 0L,
                             completedAt = o.optLong("completedAt").takeIf { it > 0L }
-                                ?: storage.lastModified(),
-                            storagePath = storage.absolutePath,
+                                ?: if (fileOk) storage.lastModified() else System.currentTimeMillis(),
+                            storagePath = if (storage.exists()) storage.absolutePath else storagePath,
+                            folderId = folderRaw.takeIf { it.isNotBlank() },
                         ),
                     )
                 }
@@ -814,10 +918,46 @@ class DownloadStore(context: Context) {
                     .put("duration", d.duration)
                     .put("resolution", d.resolution)
                     .put("sizeBytes", d.sizeBytes)
-                    .put("completedAt", d.completedAt),
+                    .put("completedAt", d.completedAt)
+                    .put("folderId", d.folderId.orEmpty()),
             )
         }
-        return prefs.edit().putString(KEY_LIST, arr.toString()).commit()
+        val ok = prefs.edit().putString(KEY_LIST, arr.toString()).commit()
+        if (ok) persistDurable()
+        return ok
+    }
+
+    private fun loadFolders(): List<MediaFolder> =
+        parseMediaFolders(prefs.getString(KEY_FOLDERS, "[]"))
+
+    private fun saveFolders(list: List<MediaFolder>) {
+        prefs.edit().putString(KEY_FOLDERS, list.toJsonArray().toString()).apply()
+        persistDurable()
+    }
+
+    private fun restoreFromDurableIfNeeded() {
+        val prefsEmpty = (prefs.getString(KEY_LIST, "[]") ?: "[]").let { it == "[]" || it.isBlank() }
+        val foldersEmpty = (prefs.getString(KEY_FOLDERS, "[]") ?: "[]").let { it == "[]" || it.isBlank() }
+        if (!prefsEmpty && !foldersEmpty) return
+        val snap = DurableLibraryStore.load(appContext) ?: return
+        if (prefsEmpty && snap.downloadsJson != "[]" && snap.downloadsJson.isNotBlank()) {
+            prefs.edit().putString(KEY_LIST, snap.downloadsJson).commit()
+            _downloads.value = loadAll()
+        }
+        if (foldersEmpty && snap.downloadFoldersJson != "[]" && snap.downloadFoldersJson.isNotBlank()) {
+            prefs.edit().putString(KEY_FOLDERS, snap.downloadFoldersJson).commit()
+            _folders.value = loadFolders()
+        }
+    }
+
+    private fun persistDurable() {
+        runCatching {
+            DurableLibraryStore.saveDownloads(
+                context = appContext,
+                downloadsJson = prefs.getString(KEY_LIST, "[]") ?: "[]",
+                foldersJson = prefs.getString(KEY_FOLDERS, "[]") ?: "[]",
+            )
+        }
     }
 
     private fun deleteLocalDownload(item: LocalDownload) {
@@ -902,6 +1042,7 @@ class DownloadStore(context: Context) {
         val duration: String,
         val thumbnailUrl: String,
         val referer: String,
+        val folderId: String? = null,
     )
 
     private sealed interface ProgressiveResult {
@@ -924,6 +1065,7 @@ class DownloadStore(context: Context) {
     companion object {
         private const val PREFS = "funfy_downloads"
         private const val KEY_LIST = "items"
+        private const val KEY_FOLDERS = "folders"
         private const val PART_SUFFIX = ".part"
         private const val MAX_TRANSFER_HISTORY = 100
         private const val PROGRESS_EMIT_INTERVAL_MS = 100L

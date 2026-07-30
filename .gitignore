@@ -21,6 +21,7 @@ build/
 
 # Local configuration (SDK path, secrets)
 local.properties
+key.properties
 
 # Android Studio / IntelliJ
 *.iml
@@ -73,3 +74,10 @@ mm_home.html
 mm_page.html
 txxx_embed.html
 read_ui.mjs
+/*.html
+/*.mjs
+/*.txt
+/*.js
+/*.json
+/*.png
+

@@ -4,7 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.regex.Pattern
 
-// Sexvid â€” absolute .html links + KVS streams (hash decrypt)
+// Sexvid — absolute .html links + KVS streams (hash decrypt)
 // ---------------------------------------------------------------------------
 
 class SexvidClient : VideoSourceClient {
@@ -59,9 +59,9 @@ class SexvidClient : VideoSourceClient {
             streams = labeled.distinctBy { it.url },
             title = title,
             uploader = "Sexvid",
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = NetworkClient.matchFirst(html, """class="duration"[^>]*>([^<]+)<""") ?: "â€”",
+            views = "—",
+            ratingPercent = "—",
+            duration = NetworkClient.matchFirst(html, """class="duration"[^>]*>([^<]+)<""") ?: "—",
             resolution = labeled.first().label,
             tags = emptyList(),
             related = parseListing(html).filter { it.pageUrl != pageUrl }.take(12),
@@ -98,9 +98,9 @@ class SexvidClient : VideoSourceClient {
                     id = id,
                     title = title,
                     duration = NetworkClient.matchFirst(window, """class="duration"[^>]*>([^<]+)<""")
-                        ?: "â€”",
+                        ?: "—",
                     resolution = "HD",
-                    views = "â€”",
+                    views = "—",
                     category = "Sexvid",
                     gradientSeed = index++,
                     pageUrl = href,
@@ -115,7 +115,7 @@ class SexvidClient : VideoSourceClient {
 }
 
 // ---------------------------------------------------------------------------
-// Analdin â€” KVS get_file (keep trailing slash) + listing thumbs
+// Analdin — KVS get_file (keep trailing slash) + listing thumbs
 // ---------------------------------------------------------------------------
 
 class AnaldinClient : VideoSourceClient {
@@ -150,7 +150,7 @@ class AnaldinClient : VideoSourceClient {
                     !it.url.contains("trailer", true)
             }
             .map { opt ->
-                // Critical: Analdin get_file requires trailing slash â†’ 404 without it.
+                // Critical: Analdin get_file requires trailing slash → 404 without it.
                 var u = opt.url
                 if (u.contains("/get_file/", true) && !u.contains("?") && !u.endsWith("/")) {
                     u = "$u/"
@@ -173,9 +173,9 @@ class AnaldinClient : VideoSourceClient {
             streams = streams.distinctBy { it.url },
             title = title,
             uploader = "Analdin",
-            views = "â€”",
-            ratingPercent = "â€”",
-            duration = NetworkClient.matchFirst(html, """class="duration"[^>]*>([^<]+)<""") ?: "â€”",
+            views = "—",
+            ratingPercent = "—",
+            duration = NetworkClient.matchFirst(html, """class="duration"[^>]*>([^<]+)<""") ?: "—",
             resolution = streams.first().label,
             tags = emptyList(),
             related = parseListing(html).filter { it.pageUrl != pageUrl }.take(12),
@@ -215,9 +215,9 @@ class AnaldinClient : VideoSourceClient {
                     id = id,
                     title = title,
                     duration = NetworkClient.matchFirst(window, """class="duration"[^>]*>([^<]+)<""")
-                        ?: "â€”",
+                        ?: "—",
                     resolution = "HD",
-                    views = "â€”",
+                    views = "—",
                     category = "Analdin",
                     gradientSeed = index++,
                     pageUrl = href,

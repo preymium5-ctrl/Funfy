@@ -22,6 +22,8 @@ data class LocalDownload(
      * segments. Keeping the ownership boundary explicit makes deletion safe.
      */
     val storagePath: String = filePath,
+    /** Null = root (not in a folder). */
+    val folderId: String? = null,
 ) {
     val sizeLabel: String
         get() = formatDownloadBytes(sizeBytes)

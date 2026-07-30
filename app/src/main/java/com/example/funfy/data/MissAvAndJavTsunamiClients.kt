@@ -5,165 +5,7 @@ import kotlinx.coroutines.withContext
 import java.util.regex.Pattern
 
 // ---------------------------------------------------------------------------
-// MissAV — listing /en/{dvd-id} + packed surrit.com HLS
-// ---------------------------------------------------------------------------
-
-class MissAvClient : VideoSourceClient {
-    override val source = VideoSource.MISSAV
-
-    override suspend fun fetchHomeVideos(page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
-        val p = page.coerceAtLeast(1)
-        val paths = if (p <= 1) {
-            listOf("/dm539/en/new", "/dm634/en/release", "/en")
-        } else {
-            listOf("/dm539/en/new?page=$p", "/dm634/en/release?page=$p")
-        }
-        for (path in paths) {
-            try {
-                val items = parseListing(NetworkClient.get(source.baseUrl + path, source.baseUrl))
-                if (items.isNotEmpty()) return@withContext items
-            } catch (_: Exception) {
-            }
-        }
-        emptyList()
-    }
-
-    override suspend fun search(query: String): List<VideoItem> = search(query, 1)
-
-    override suspend fun search(query: String, page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
-        val q = java.net.URLEncoder.encode(query.trim(), Charsets.UTF_8.name())
-        val p = page.coerceAtLeast(1)
-        val path = if (p <= 1) "/en/search/$q" else "/en/search/$q?page=$p"
-        parseListing(NetworkClient.get(source.baseUrl + path, source.baseUrl))
-    }
-
-    override suspend fun fetchVideoDetails(pageUrl: String): VideoDetails = withContext(Dispatchers.IO) {
-        val html = NetworkClient.get(pageUrl, source.baseUrl)
-        val title = NetworkClient.decodeHtml(
-            NetworkClient.matchFirst(html, """property="og:title"\s+content="([^"]+)"""")
-                ?: NetworkClient.matchFirst(html, """<title>([^<]+)</title>""")
-                ?: "MissAV",
-        ).substringBefore(" | ").trim()
-        val thumb = NetworkClient.matchFirst(html, """property="og:image"\s+content="([^"]+)"""")
-            ?: NetworkClient.matchFirst(html, """(https?://fourhoi\.com/[^"']+cover[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)""")
-            ?: ""
-        // Packed player: source='https://surrit.com/{uuid}/playlist.m3u8'
-        var streams = extractSurritStreams(html)
-        if (streams.isEmpty()) {
-            val unpacked = JsPackerUnpacker.unpackAll(html)
-            streams = extractSurritStreams(unpacked) + collectMp4AndHls(unpacked)
-        }
-        if (streams.isEmpty()) {
-            streams = collectMp4AndHls(html, source.baseUrl)
-        }
-        if (streams.isEmpty()) throw IllegalStateException("No stream on MissAV")
-        VideoDetails(
-            streamUrl = streams.first().url,
-            streams = streams.distinctBy { it.url },
-            title = title,
-            uploader = "MissAV",
-            views = "—",
-            ratingPercent = "—",
-            duration = "—",
-            resolution = streams.first().label,
-            tags = emptyList(),
-            related = parseListing(html).filter { it.pageUrl != pageUrl }.take(14),
-            thumbnailUrl = thumb,
-        )
-    }
-
-    private fun extractSurritStreams(blob: String): List<StreamOption> {
-        val out = linkedMapOf<String, StreamOption>()
-        // source='…playlist.m3u8' / source842='…/720p/video.m3u8'
-        val m = Pattern.compile(
-            """source(?:\d*)\s*=\s*['"](https?://(?:surrit\.com|[^"']+)[^"']+\.m3u8[^"']*)['"]""",
-            Pattern.CASE_INSENSITIVE,
-        ).matcher(blob)
-        while (m.find()) {
-            val u = m.group(1)?.replace("\\/", "/") ?: continue
-            val label = when {
-                u.contains("1080") -> "1080p"
-                u.contains("720") -> "720p"
-                u.contains("480") -> "480p"
-                u.contains("360") -> "360p"
-                u.contains("playlist") -> "Auto (HLS)"
-                else -> "HLS"
-            }
-            out.putIfAbsent(label, StreamOption(label, u))
-        }
-        val bare = Pattern.compile(
-            """(https?://surrit\.com/[^"'\\\s]+\.m3u8[^"'\\\s]*)""",
-            Pattern.CASE_INSENSITIVE,
-        ).matcher(blob)
-        while (bare.find()) {
-            val u = bare.group(1)?.replace("\\/", "/") ?: continue
-            out.putIfAbsent(u, StreamOption("Auto (HLS)", u))
-        }
-        return out.values.sortedByDescending {
-            it.label.filter(Char::isDigit).toIntOrNull() ?: if (it.label.contains("Auto")) 50 else 0
-        }
-    }
-
-    private fun parseListing(html: String): List<VideoItem> {
-        val items = mutableListOf<VideoItem>()
-        val seen = mutableSetOf<String>()
-        var index = 0
-        // https://missav.ws/en/docp-404-2  or /dm539/en/code
-        val m = Pattern.compile(
-            """href="((?:https://missav\.ws)?/(?:dm\d+/)?en/([a-z0-9][a-z0-9-]{2,}))"""",
-            Pattern.CASE_INSENSITIVE,
-        ).matcher(html)
-        val skip = setOf(
-            "new", "release", "search", "vip", "saved", "actresses", "makers",
-            "genres", "login", "register", "dm", "cn", "ja", "ko", "ms", "th",
-        )
-        while (m.find()) {
-            val path = m.group(1) ?: continue
-            val slug = m.group(2) ?: continue
-            if (slug in skip || slug.startsWith("dm")) continue
-            if (!seen.add(slug)) continue
-            val window = html.substring(
-                (m.start() - 200).coerceAtLeast(0),
-                (m.start() + 800).coerceAtMost(html.length),
-            )
-            val thumb = NetworkClient.matchFirst(
-                window,
-                """(?:data-src|src)="(https?://fourhoi\.com/[^"]+)"""",
-            ) ?: NetworkClient.matchFirst(
-                window,
-                """(?:data-src|src)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
-            ).orEmpty()
-            if (thumb.contains("flag", true) || thumb.contains("favicon", true)) continue
-            val title = NetworkClient.decodeHtml(
-                NetworkClient.matchFirst(window, """(?:alt|title)="([^"]{2,})"""")
-                    ?: slug.uppercase(),
-            )
-            // Prefer constructed fourhoi cover when missing
-            val cover = thumb.ifBlank {
-                "https://fourhoi.com/$slug/cover-t.jpg"
-            }
-            items.add(
-                VideoItem(
-                    id = slug,
-                    title = title,
-                    duration = "—",
-                    resolution = "HD",
-                    views = "—",
-                    category = "MissAV",
-                    gradientSeed = index++,
-                    pageUrl = NetworkClient.absoluteUrl(source.baseUrl, path),
-                    thumbnailUrl = cover,
-                    sourceId = source.id,
-                ),
-            )
-            if (items.size >= 60) break
-        }
-        return items
-    }
-}
-
-// ---------------------------------------------------------------------------
-// JavTsunami — WP posts ending in .html + multi-host embeds
+// JavTsunami — WP posts + turbovid / streamwish embeds → direct HLS
 // ---------------------------------------------------------------------------
 
 class JavTsunamiClient : VideoSourceClient {
@@ -179,7 +21,9 @@ class JavTsunamiClient : VideoSourceClient {
 
     override suspend fun search(query: String, page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
         val q = java.net.URLEncoder.encode(query.trim(), Charsets.UTF_8.name())
-        parseListing(NetworkClient.get("${source.baseUrl}/?s=$q", source.baseUrl))
+        val p = page.coerceAtLeast(1)
+        val url = if (p <= 1) "${source.baseUrl}/?s=$q" else "${source.baseUrl}/page/$p/?s=$q"
+        parseListing(NetworkClient.get(url, source.baseUrl))
     }
 
     override suspend fun fetchVideoDetails(pageUrl: String): VideoDetails = withContext(Dispatchers.IO) {
@@ -191,8 +35,9 @@ class JavTsunamiClient : VideoSourceClient {
         ).substringBefore(" - ").trim()
         val thumb = NetworkClient.matchFirst(html, """property="og:image"\s+content="([^"]+)"""")
             .orEmpty()
+        // Page-local mp4/m3u8 — drop invalid hosts (https://.etvp.cc/...)
         var streams = collectMp4AndHls(html, source.baseUrl)
-        var embedUrl: String? = null
+            .filter { isValidMediaUrl(it.url) && (it.url.contains("m3u8", true) || it.url.contains("mp4", true)) }
         val embeds = mutableListOf<String>()
         val ifr = Pattern.compile(
             """iframe[^>]+src=["'](https?://[^"']+)["']""",
@@ -200,53 +45,102 @@ class JavTsunamiClient : VideoSourceClient {
         ).matcher(html)
         while (ifr.find()) {
             val src = ifr.group(1) ?: continue
-            if (src.contains("cbox") || src.contains("googletag") || src.contains(".js")) continue
+            if (src.contains("cbox") || src.contains("googletag") || src.contains("/ad")) continue
             embeds.add(src)
         }
-        // bare host embeds
         val bare = Pattern.compile(
-            """(https?://(?:turbovidhls\.com|hicherri\.com|vide0\.net|playerwish\.com|strwish\.com|streamwish\.to|filemoon\.[a-z]+|dood\.[a-z]+)/[^\s"'<>]+)""",
+            """(https?://(?:turbovidhls\.com|turboviplay\.com|hicherri\.com|vide0\.net|playerwish\.com|strwish\.com|streamwish\.to|filemoon\.[a-z]+)/[^\s"'<>]+)""",
             Pattern.CASE_INSENSITIVE,
         ).matcher(html)
         while (bare.find()) {
             bare.group(1)?.let { embeds.add(it) }
         }
-        for (emb in embeds.distinct().take(6)) {
-            embedUrl = emb
-            if (isStreamWishHost(emb) || emb.contains("hicherri") || emb.contains("turbovid")) {
-                val wish = resolveStreamWishEmbed(emb, pageUrl)
-                if (wish.isNotEmpty()) {
-                    streams = wish
+        var sawDeadEtvp = false
+        for (emb in embeds.distinct().take(8)) {
+            try {
+                // Turbovid first — data-hash m3u8 when available; skip dead .etvp.cc mp4 hosts.
+                if (emb.contains("turbovid", true) || emb.contains("turboviplay", true)) {
+                    val turbo = resolveTurbovidEmbed(emb, pageUrl)
+                        .filter { isValidMediaUrl(it.url) }
+                    if (turbo.isNotEmpty()) {
+                        streams = turbo
+                        break
+                    }
+                    // Detect dead embed so we can surface a clear error
+                    try {
+                        val embHtml = NetworkClient.get(emb, pageUrl)
+                        if (embHtml.contains("://.etvp.cc", true) ||
+                            embHtml.contains("urlPlay = 'https://.", true)
+                        ) {
+                            sawDeadEtvp = true
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+                if (isStreamWishHost(emb)) {
+                    val wish = resolveStreamWishEmbed(emb, pageUrl)
+                        .filter { isValidMediaUrl(it.url) }
+                    if (wish.isNotEmpty()) {
+                        streams = wish
+                        break
+                    }
+                }
+                val dood = resolveDoodStreamEmbed(emb, pageUrl)
+                    .filter { isValidMediaUrl(it.url) }
+                if (dood.isNotEmpty()) {
+                    streams = dood
                     break
                 }
-            }
-            try {
                 val nested = NetworkClient.get(emb, pageUrl)
-                val nestedStreams = collectMp4AndHls(nested) + resolveStreamWishEmbed(emb, pageUrl)
+                val nestedStreams = collectMp4AndHls(nested)
+                    .filter { isValidMediaUrl(it.url) }
+                    .ifEmpty {
+                        if (nested.contains("turboviplay", true) || nested.contains(".m3u8") ||
+                            nested.contains("data-hash", true)
+                        ) {
+                            resolveTurbovidEmbed(emb, pageUrl).filter { isValidMediaUrl(it.url) }
+                        } else {
+                            emptyList()
+                        }
+                    }
                 if (nestedStreams.isNotEmpty()) {
                     streams = nestedStreams
                     break
                 }
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
             }
         }
-        if (streams.isEmpty() && !embedUrl.isNullOrBlank()) {
-            streams = listOf(StreamOption("Embed", embedUrl!!))
+        streams = streams.filter { isValidMediaUrl(it.url) }
+        if (streams.isEmpty()) {
+            throw IllegalStateException(
+                if (sawDeadEtvp) {
+                    "No playable stream on JavTsunami (embed CDN host missing)"
+                } else {
+                    "No playable stream on JavTsunami"
+                },
+            )
         }
-        if (streams.isEmpty()) throw IllegalStateException("No stream on JavTsunami")
+        // Prefer m3u8 over progressive
+        val preferred = streams.sortedByDescending {
+            when {
+                it.url.contains("m3u8", true) -> 2
+                it.url.contains("mp4", true) -> 1
+                else -> 0
+            }
+        }
         VideoDetails(
-            streamUrl = streams.first().url,
-            streams = streams.distinctBy { it.url },
+            streamUrl = preferred.first().url,
+            streams = preferred.distinctBy { it.url },
             title = title,
             uploader = "JavTsunami",
             views = "—",
             ratingPercent = "—",
             duration = "—",
-            resolution = streams.first().label,
+            resolution = preferred.first().label,
             tags = emptyList(),
             related = parseListing(html).filter { it.pageUrl != pageUrl }.take(12),
             thumbnailUrl = thumb,
-            embedUrl = if (streams.first().label == "Embed") embedUrl else null,
+            embedUrl = null,
         )
     }
 
@@ -254,7 +148,6 @@ class JavTsunamiClient : VideoSourceClient {
         val items = mutableListOf<VideoItem>()
         val seen = mutableSetOf<String>()
         var index = 0
-        // https://javtsunami.com/thai-subtitle-start588v.html
         val m = Pattern.compile(
             """href="(https://javtsunami\.com/([a-z0-9][a-z0-9-_%]+)\.html)"""",
             Pattern.CASE_INSENSITIVE,
@@ -277,9 +170,6 @@ class JavTsunamiClient : VideoSourceClient {
                 window,
                 """(?:data-src|src)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
             ).orEmpty()
-            if (thumb.startsWith("data:image") || thumb.contains("placeholder", true)) {
-                // try after link
-            }
             val cleanThumb = if (thumb.startsWith("data:") || thumb.contains("svg")) {
                 NetworkClient.matchFirst(
                     html.substring(m.start(), (m.start() + 1200).coerceAtMost(html.length)),
@@ -311,15 +201,4 @@ class JavTsunamiClient : VideoSourceClient {
         }
         return items
     }
-}
-
-private fun isStreamWishHost(url: String): Boolean {
-    val h = url.lowercase()
-    return h.contains("playerwish") ||
-        h.contains("strwish") ||
-        h.contains("streamwish") ||
-        h.contains("swishsrv") ||
-        h.contains("hlswish") ||
-        h.contains("hicherri") ||
-        h.contains("turbovid")
 }

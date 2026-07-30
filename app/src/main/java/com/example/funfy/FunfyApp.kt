@@ -10,7 +10,12 @@ import com.example.funfy.data.BookmarkStore
 import com.example.funfy.data.DefaultDataRepository
 import com.example.funfy.data.DownloadStore
 import com.example.funfy.data.NetworkClient
+import com.example.funfy.data.SearchHistoryStore
 import com.example.funfy.data.SourcePreferences
+import com.example.funfy.ads.AdMobConfig
+import com.example.funfy.ads.AppOpenAdManager
+import com.google.android.gms.ads.MobileAds
+import com.google.android.gms.ads.RequestConfiguration
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -25,11 +30,45 @@ class FunfyApp : Application(), ImageLoaderFactory {
   lateinit var bookmarkStore: BookmarkStore
     private set
 
+  lateinit var searchHistoryStore: SearchHistoryStore
+    private set
+
+  lateinit var appOpenAdManager: AppOpenAdManager
+    private set
+
   override fun onCreate() {
     super.onCreate()
+    // Keep non-fatal ad/image loader crashes from taking down the whole process.
+    val previous = Thread.getDefaultUncaughtExceptionHandler()
+    Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+      val msg = error.message.orEmpty()
+      val isBenignAdImage =
+        msg.contains("destroyed activity", ignoreCase = true) ||
+          msg.contains("You cannot start a load", ignoreCase = true)
+      if (isBenignAdImage) {
+        android.util.Log.e("FunfyApp", "Swallowed non-fatal image/ad crash", error)
+        return@setDefaultUncaughtExceptionHandler
+      }
+      previous?.uncaughtException(thread, error)
+    }
     repository = DefaultDataRepository(SourcePreferences(this))
     downloadStore = DownloadStore(this)
     bookmarkStore = BookmarkStore(this)
+    searchHistoryStore = SearchHistoryStore(this)
+    // Test devices get Google sample ads (avoids invalid-traffic flags while developing).
+    try {
+      MobileAds.setRequestConfiguration(
+        RequestConfiguration.Builder()
+          .setTestDeviceIds(AdMobConfig.TEST_DEVICE_IDS)
+          .build(),
+      )
+      // App Open ads: show when the user opens / returns to the app.
+      appOpenAdManager = AppOpenAdManager(this)
+      appOpenAdManager.start()
+    } catch (t: Throwable) {
+      android.util.Log.e("FunfyApp", "Ads init failed — continuing without App Open", t)
+      appOpenAdManager = AppOpenAdManager(this)
+    }
   }
 
   override fun newImageLoader(): ImageLoader {
@@ -50,6 +89,9 @@ class FunfyApp : Application(), ImageLoaderFactory {
             host.contains("buumal") -> "https://www.buumal.com/"
             host.contains("indo18") -> "https://www.indo18.com/"
             host.contains("pinayot") -> "https://pinayot.com/"
+            host.contains("pinaydeepweb") || host.contains("lootedpinay") ->
+              "https://lootedpinay.com/"
+            host.contains("kaldagan") -> "https://kaldagan.com/"
             host.contains("pinayflixhd") -> "https://pinayflixhd.com/"
             host.contains("pinayflix") -> "https://pinayflix.uk/"
             host.contains("flixtream") || host.contains("goostream") ||
@@ -68,6 +110,8 @@ class FunfyApp : Application(), ImageLoaderFactory {
             host.contains("javtsunami") || host.contains("imagerls") -> "https://javtsunami.com/"
             host.contains("missav") || host.contains("fourhoi") || host.contains("surrit") ->
               "https://missav.ws/"
+            host.contains("jable") -> "https://jable.tv/"
+            host.contains("javmost") || host.contains("supjav") -> "https://www.javmost.ws/"
             host.contains("javff") || host.contains("dmm.co.jp") || host.contains("pics.dmm") ->
               "https://javtsunami.com/"
             host.contains("javseen") -> "https://javseenz.tv/"

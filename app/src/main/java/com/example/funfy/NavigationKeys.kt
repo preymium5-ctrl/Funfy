@@ -17,4 +17,6 @@ data class Player(
   val uploader: String = "",
   /** When true, [pageUrl] is a local file path for offline playback. */
   val isLocal: Boolean = false,
+  /** Resume position when returning from a related video (ms). */
+  val resumePositionMs: Long = 0L,
 ) : NavKey

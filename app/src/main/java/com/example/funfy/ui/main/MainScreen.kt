@@ -6,16 +6,20 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -55,9 +59,11 @@ import com.example.funfy.data.DownloadStatus
 import com.example.funfy.data.DownloadTransfer
 import com.example.funfy.data.GallerySaver
 import com.example.funfy.data.LocalDownload
+import com.example.funfy.data.MediaFolder
 import com.example.funfy.data.VideoItem
 import com.example.funfy.data.VideoSource
 import com.example.funfy.data.XvideosTags
+import com.example.funfy.ads.NativeAdCard
 import com.example.funfy.theme.*
 import java.io.File
 
@@ -81,37 +87,51 @@ fun MainScreen(
   val context = LocalContext.current
   val viewModel: MainScreenViewModel = viewModel {
     val app = context.applicationContext as FunfyApp
-    MainScreenViewModel(app.repository, app.downloadStore, app.bookmarkStore)
+    MainScreenViewModel(
+      app.repository,
+      app.downloadStore,
+      app.bookmarkStore,
+      app.searchHistoryStore,
+      isAutoShuffle = { AppSettings.autoShuffle(app) },
+    )
   }
   val state by viewModel.uiState.collectAsStateWithLifecycle()
   val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
+  val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
   val searchLoading by viewModel.searchLoading.collectAsStateWithLifecycle()
   val searchError by viewModel.searchError.collectAsStateWithLifecycle()
   val searchSource by viewModel.searchSource.collectAsStateWithLifecycle()
   val searchPageLoading by viewModel.searchPageLoading.collectAsStateWithLifecycle()
   val searchHasMore by viewModel.searchHasMore.collectAsStateWithLifecycle()
+  val searchHistory by viewModel.searchHistory.collectAsStateWithLifecycle()
   val currentSource by viewModel.currentSource.collectAsStateWithLifecycle()
   val loadedPages by viewModel.loadedPages.collectAsStateWithLifecycle()
   val hasMore by viewModel.hasMore.collectAsStateWithLifecycle()
   val pageLoading by viewModel.pageLoading.collectAsStateWithLifecycle()
   val pageMap by viewModel.pageMap.collectAsStateWithLifecycle()
   val homePage by viewModel.homePage.collectAsStateWithLifecycle()
+  val visiblePageCount by viewModel.visiblePageCount.collectAsStateWithLifecycle()
   val activeTag by viewModel.activeTag.collectAsStateWithLifecycle()
   val downloads by viewModel.downloads.collectAsStateWithLifecycle()
   val downloadTransfers by viewModel.downloadTransfers.collectAsStateWithLifecycle()
   val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
+  val bookmarkFolders by viewModel.bookmarkFolders.collectAsStateWithLifecycle()
+  val downloadFolders by viewModel.downloadFolders.collectAsStateWithLifecycle()
   var selectedTab by remember { mutableStateOf(Tab.Home) }
   var previewsDisabled by remember(context) {
     mutableStateOf(AppSettings.disablePreviews(context))
   }
   // Player history stack: related clicks push; Back pops to previous video, then home.
   val playerStack = remember { mutableStateListOf<Player>() }
+  // pageUrl → last playback position (ms) so related → back keeps progress.
+  val watchProgressMs = remember { mutableStateMapOf<String, Long>() }
   var playerFullscreen by remember { mutableStateOf(false) }
   val activePlayer = playerStack.lastOrNull()
 
   fun pushPlayer(player: Player) {
     playerFullscreen = false
-    playerStack.add(player)
+    val resume = watchProgressMs[player.pageUrl] ?: player.resumePositionMs
+    playerStack.add(player.copy(resumePositionMs = resume))
   }
 
   fun popPlayer() {
@@ -137,11 +157,12 @@ fun MainScreen(
         videoId = video.id,
         title = video.title,
         pageUrl = video.pageUrl,
-        thumbnailUrl = video.thumbnailUrl,
+        thumbnailUrl = com.example.funfy.data.NetworkClient.sanitizeMediaUrl(video.thumbnailUrl),
         duration = video.duration,
         resolution = video.resolution,
         views = video.views,
         uploader = video.category,
+        resumePositionMs = watchProgressMs[video.pageUrl] ?: 0L,
       ),
     )
   }
@@ -196,6 +217,10 @@ fun MainScreen(
                                       // Switching tabs from the player closes it and shows that tab.
                                       clearPlayerStack()
                                       selectedTab = tab
+                                      if (tab == Tab.Bookmarks) {
+                                          // Force re-resolve so wrong covers from older scrapes get fixed.
+                                          viewModel.refreshBookmarkThumbnails(force = true)
+                                      }
                                   }
                                   .padding(vertical = 4.dp),
                               horizontalAlignment = Alignment.CenterHorizontally,
@@ -227,7 +252,7 @@ fun MainScreen(
       Box(
           modifier = Modifier
               .fillMaxSize()
-              .padding(innerPadding)
+              .then(if (activePlayer != null && playerFullscreen) Modifier else Modifier.padding(innerPadding))
       ) {
           val player = activePlayer
           if (player != null) {
@@ -241,21 +266,32 @@ fun MainScreen(
                       uploader = player.uploader,
                       thumbnailUrl = player.thumbnailUrl,
                       isLocal = player.isLocal,
+                      // Prefer latest saved progress (related → back), not the stale stack value.
+                      initialPositionMs = watchProgressMs[player.pageUrl]
+                          ?: player.resumePositionMs,
+                      onProgressSave = { pos ->
+                          if (player.pageUrl.isNotBlank() && pos > 1_000L) {
+                              watchProgressMs[player.pageUrl] = pos
+                          }
+                      },
                       onBack = { popPlayer() },
                       onFullscreenChange = { playerFullscreen = it },
                       onRelatedClick = { video ->
                           if (video.pageUrl.isNotBlank()) {
-                              // Push related on the stack so Back returns to previous video.
+                              // Push related on the stack so Back returns to previous video
+                              // with its saved watch position.
                               pushPlayer(
                                   Player(
                                       videoId = video.id,
                                       title = video.title,
                                       pageUrl = video.pageUrl,
-                                      thumbnailUrl = video.thumbnailUrl,
+                                      thumbnailUrl = com.example.funfy.data.NetworkClient
+                                          .sanitizeMediaUrl(video.thumbnailUrl),
                                       duration = video.duration,
                                       resolution = video.resolution,
                                       views = video.views,
                                       uploader = video.category,
+                                      resumePositionMs = watchProgressMs[video.pageUrl] ?: 0L,
                                   ),
                               )
                           }
@@ -315,6 +351,7 @@ fun MainScreen(
                           HomeScreenContent(
                               pageMap = pageMap,
                               loadedPages = loadedPages.coerceAtLeast(1),
+                              visiblePageCount = visiblePageCount,
                               hasMore = hasMore,
                               pageLoading = pageLoading,
                               activeTag = activeTag,
@@ -333,12 +370,17 @@ fun MainScreen(
               Tab.Search -> {
                   SearchScreenContent(
                       remoteResults = searchResults,
+                      searchQuery = searchQuery,
+                      onSearchQueryChange = viewModel::setSearchQuery,
                       searchLoading = searchLoading,
                       searchError = searchError,
                       currentSource = currentSource,
                       resultSource = searchSource,
+                      searchHistory = searchHistory,
                       onSearch = viewModel::search,
                       onClearSearch = viewModel::clearSearch,
+                      onRemoveHistory = viewModel::removeSearchHistory,
+                      onClearHistory = viewModel::clearSearchHistory,
                       searchPageLoading = searchPageLoading,
                       searchHasMore = searchHasMore,
                       onLoadMore = viewModel::loadMoreSearch,
@@ -348,10 +390,16 @@ fun MainScreen(
               }
               Tab.Bookmarks -> BookmarksScreenContent(
                   bookmarks = bookmarks,
+                  folders = bookmarkFolders,
                   onOpen = { bm -> openVideo(bm.toVideoItem()) },
+                  onDelete = viewModel::removeBookmark,
+                  onMoveToFolder = viewModel::moveBookmarkToFolder,
+                  onCreateFolder = viewModel::createBookmarkFolder,
+                  onDeleteFolder = viewModel::deleteBookmarkFolder,
               )
               Tab.Downloads -> DownloadsScreenContent(
                   downloads = downloads,
+                  folders = downloadFolders,
                   transfers = downloadTransfers,
                   onOpen = ::openLocalDownload,
                   onDelete = viewModel::removeDownload,
@@ -359,8 +407,11 @@ fun MainScreen(
                   onCancel = viewModel::cancelDownload,
                   onRetry = viewModel::retryDownload,
                   onDismissTransfer = viewModel::dismissDownloadTransfer,
+                  onMoveToFolder = viewModel::moveDownloadToFolder,
+                  onCreateFolder = viewModel::createDownloadFolder,
+                  onDeleteFolder = viewModel::deleteDownloadFolder,
                   onSaveToGallery = { item ->
-                      val result = GallerySaver.saveVideo(context, item.filePath, item.title)
+                      val result = GallerySaver.saveVideo(context, item.filePath, item.title, item.storagePath)
                       result.fold(
                           onSuccess = {
                               Toast.makeText(
@@ -389,6 +440,7 @@ fun MainScreen(
                       previewsDisabled = disabled
                   },
                   onClearDownloads = viewModel::clearDownloads,
+                  onAutoShuffleChanged = viewModel::onAutoShuffleChanged,
               )
           }
       }
@@ -400,6 +452,7 @@ fun MainScreen(
 fun HomeScreenContent(
     pageMap: Map<Int, List<VideoItem>>,
     loadedPages: Int,
+    visiblePageCount: Int = MainScreenViewModel.INITIAL_VISIBLE_PAGES,
     hasMore: Boolean,
     pageLoading: Boolean,
     activeTag: ContentTag?,
@@ -419,10 +472,25 @@ fun HomeScreenContent(
 
     // Recompose when pageMap updates for this page
     val pageVideos = pageMap[currentPage].orEmpty()
-    val maxPageNumber = maxOf(loadedPages, currentPage, 1) + if (hasMore) 1 else 0
-    val windowSize = 5
-    val windowStart = maxOf(1, minOf(currentPage - 2, maxOf(1, maxPageNumber - windowSize + 1)))
-    val windowEnd = minOf(maxPageNumber, windowStart + windowSize - 1)
+    // Unlocked range grows by +3 when the user taps the last page.
+    val maxPageNumber = if (hasMore) {
+        maxOf(visiblePageCount, currentPage, loadedPages, 1)
+    } else {
+        maxOf(loadedPages, currentPage, 1)
+    }
+    // Sliding window of 6 chips: start 1–6; after expand to 9 show 4–9 (hid 1–3);
+    // after expand to 12 show 7–12, etc. Going back early still reveals 1–6.
+    val windowSize = MainScreenViewModel.PAGE_WINDOW_SIZE
+    var windowStart = if (maxPageNumber <= windowSize) {
+        1
+    } else {
+        maxOf(1, minOf(currentPage - 2, maxPageNumber - windowSize + 1))
+    }
+    var windowEnd = minOf(maxPageNumber, windowStart + windowSize - 1)
+    if (windowEnd - windowStart + 1 < windowSize && maxPageNumber >= windowSize) {
+        windowStart = maxPageNumber - windowSize + 1
+        windowEnd = maxPageNumber
+    }
 
     if (showTagFilter) {
         TagFilterDialog(
@@ -513,80 +581,129 @@ fun HomeScreenContent(
                     )
                 }
             } else {
-                items(pageVideos, key = { "${it.sourceId}_${it.id}_$currentPage" }) { video ->
-                    VideoCard(
-                        video = video,
-                        onClick = { onVideoClick(video) },
-                    )
+                pageVideos.forEachIndexed { index, video ->
+                    item(key = "${video.sourceId}_${video.id}_${currentPage}_$index") {
+                        VideoCard(
+                            video = video,
+                            onClick = { onVideoClick(video) },
+                        )
+                    }
+                    if (index == 3 || (index > 3 && (index - 3) % 6 == 0)) {
+                        item(
+                            key = "native_ad_${currentPage}_$index",
+                            span = { GridItemSpan(maxLineSpan) },
+                        ) {
+                            NativeAdCard()
+                        }
+                    }
                 }
             }
 
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
+                val canPrev = currentPage > 1 && !pageLoading
+                val canNext = !pageLoading && (currentPage < maxPageNumber || hasMore)
+                // Fixed Prev / Next chips + scrollable page numbers so buttons never
+                // get squeezed off-screen when many page slots are unlocked.
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 16.dp),
-                    horizontalArrangement = Arrangement.Center,
+                        .padding(start = 4.dp, end = 4.dp, bottom = 18.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TextButton(
-                        onClick = { if (currentPage > 1) onPageChange(currentPage - 1) },
-                        enabled = currentPage > 1 && !pageLoading,
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = Color.White,
-                            disabledContentColor = Color.Gray,
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (canPrev) CookiesmoSurface else CookiesmoSurface.copy(alpha = 0.45f),
+                        border = BorderStroke(
+                            1.dp,
+                            if (canPrev) CookiesmoAccent else CookiesmoMuted,
                         ),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(enabled = canPrev) {
+                                onPageChange(currentPage - 1)
+                            },
                     ) {
-                        Text("< Prev", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text(
+                            text = "Prev",
+                            color = if (canPrev) CookiesmoTextPrimary else CookiesmoTextMuted,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        )
                     }
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    for (p in windowStart..windowEnd) {
-                        val isCurrent = p == currentPage
-                        val enabled = p <= loadedPages || (hasMore && p == loadedPages + 1)
-                        Box(
-                            modifier = Modifier
-                                .size(32.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (isCurrent) CookiesmoAccent else Color.Transparent)
-                                .clickable(enabled = enabled && !pageLoading) {
-                                    onPageChange(p)
-                                }
-                                .wrapContentHeight(Alignment.CenterVertically),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = p.toString(),
-                                color = if (isCurrent) CookiesmoBg else if (enabled) CookiesmoTextPrimary else CookiesmoTextMuted,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-                                fontSize = 14.sp,
-                            )
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        for (p in windowStart..windowEnd) {
+                            val isCurrent = p == currentPage
+                            val enabled = p <= maxPageNumber && !pageLoading
+                            Box(
+                                modifier = Modifier
+                                    .padding(horizontal = 2.dp)
+                                    .size(34.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (isCurrent) CookiesmoAccent else Color.Transparent,
+                                    )
+                                    .clickable(enabled = enabled) { onPageChange(p) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = p.toString(),
+                                    color = when {
+                                        isCurrent -> CookiesmoBg
+                                        enabled -> CookiesmoTextPrimary
+                                        else -> CookiesmoTextMuted
+                                    },
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                                    fontSize = 14.sp,
+                                )
+                            }
                         }
-                        Spacer(modifier = Modifier.width(4.dp))
                     }
 
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
 
-                    val canNext = !pageLoading && (currentPage < loadedPages || hasMore)
-                    TextButton(
-                        onClick = { onPageChange(currentPage + 1) },
-                        enabled = canNext,
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = Color.White,
-                            disabledContentColor = Color.Gray,
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (canNext) CookiesmoSurface else CookiesmoSurface.copy(alpha = 0.45f),
+                        border = BorderStroke(
+                            1.dp,
+                            if (canNext) CookiesmoAccent else CookiesmoMuted,
                         ),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(enabled = canNext) {
+                                onPageChange(currentPage + 1)
+                            },
                     ) {
-                        if (pageLoading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                color = Color.White,
-                                strokeWidth = 2.dp,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        ) {
+                            if (pageLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    color = CookiesmoAccent,
+                                    strokeWidth = 2.dp,
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+                            Text(
+                                text = "Next",
+                                color = if (canNext) CookiesmoTextPrimary else CookiesmoTextMuted,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
                             )
-                        } else {
-                            Text("Next >", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
                     }
                 }
@@ -708,8 +825,12 @@ fun VideoCard(
 
             if (previewsEnabled && video.thumbnailUrl.isNotBlank()) {
                 AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(video.thumbnailUrl)
+                    model = ImageRequest.Builder(context.applicationContext)
+                        .data(
+                            com.example.funfy.data.NetworkClient.sanitizeMediaUrl(
+                                video.thumbnailUrl,
+                            ),
+                        )
                         // Decode near card size so big DrKoGyi/WP PNGs load faster.
                         .size(480)
                         .crossfade(120)
@@ -885,21 +1006,24 @@ fun getGradientColor2(seed: Int): Color {
 @Composable
 fun SearchScreenContent(
     remoteResults: List<VideoItem>?,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
     searchLoading: Boolean,
     searchError: String?,
     currentSource: VideoSource,
     resultSource: VideoSource?,
+    searchHistory: List<com.example.funfy.data.SearchHistoryEntry> = emptyList(),
     onSearch: (String) -> Unit,
     onClearSearch: () -> Unit,
+    onRemoveHistory: (String) -> Unit = {},
+    onClearHistory: () -> Unit = {},
     searchPageLoading: Boolean = false,
     searchHasMore: Boolean = false,
     onLoadMore: () -> Unit = {},
     onSourceSelected: (VideoSource) -> Unit,
     onVideoClick: (VideoItem) -> Unit,
 ) {
-    var searchQuery by remember { mutableStateOf("") }
     var showSourcePicker by remember { mutableStateOf(false) }
-    val tags = listOf("amateur", "teen", "milf", "asian", "latina", "lesbian", "anal", "blowjob")
 
     if (showSourcePicker) {
         SourcePickerDialog(
@@ -914,11 +1038,9 @@ fun SearchScreenContent(
         )
     }
 
-    // Include source in the debounce key. The ViewModel cancels any old
-    // request, preventing a late response from a previous source being shown.
+    // Debounced search. Query lives in the ViewModel so Back from the player
+    // restores both the text field and results (no clear-on-recompose).
     LaunchedEffect(searchQuery, currentSource.id) {
-        // Hide stale cards as soon as either the query or source changes.
-        onClearSearch()
         if (searchQuery.isBlank()) {
             return@LaunchedEffect
         }
@@ -939,7 +1061,7 @@ fun SearchScreenContent(
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 value = searchQuery,
-                onValueChange = { searchQuery = it },
+                onValueChange = onSearchQueryChange,
                 placeholder = { Text("Search videos…", color = InactiveTabBlue) },
                 leadingIcon = {
                     Icon(Icons.Default.Search, contentDescription = "Search", tint = InactiveTabBlue)
@@ -948,7 +1070,7 @@ fun SearchScreenContent(
                     if (searchQuery.isNotBlank()) {
                         IconButton(
                             onClick = {
-                                searchQuery = ""
+                                onSearchQueryChange("")
                                 onClearSearch()
                             },
                         ) {
@@ -1014,33 +1136,82 @@ fun SearchScreenContent(
         Spacer(modifier = Modifier.height(20.dp))
         
         if (searchQuery.isBlank()) {
-            Text(
-                text = "Popular Tags",
-                color = CookiesmoTextPrimary,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold
-            )
-            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Recent searches",
+                    color = CookiesmoTextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (searchHistory.isNotEmpty()) {
+                    Text(
+                        text = "Clear",
+                        color = CookiesmoAccent,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clickable { onClearHistory() },
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(10.dp))
-            
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val chunks = tags.chunked(3)
-                chunks.forEach { rowTags ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        rowTags.forEach { tag ->
-                            SuggestionChip(
-                                onClick = { searchQuery = tag },
-                                label = { 
-                                    Text(
-                                        text = tag, 
-                                        color = CookiesmoTextPrimary, 
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 12.sp
-                                    ) 
-                                },
-                                border = BorderStroke(1.dp, CookiesmoMuted),
-                                colors = SuggestionChipDefaults.suggestionChipColors(containerColor = CookiesmoSurface)
+            if (searchHistory.isEmpty()) {
+                Text(
+                    text = "Your past searches will show up here.",
+                    color = CookiesmoTextMuted,
+                    fontSize = 13.sp,
+                )
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    items(searchHistory, key = { it.query + it.searchedAt }) { entry ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(CookiesmoSurface)
+                                .clickable {
+                                    onSearchQueryChange(entry.query)
+                                    onSearch(entry.query)
+                                }
+                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.History,
+                                contentDescription = null,
+                                tint = TextMetaBlue,
+                                modifier = Modifier.size(20.dp),
                             )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = entry.query,
+                                    color = CookiesmoTextPrimary,
+                                    fontSize = 14.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (entry.sourceLabel.isNotBlank()) {
+                                    Text(
+                                        text = entry.sourceLabel,
+                                        color = TextMetaBlue,
+                                        fontSize = 11.sp,
+                                    )
+                                }
+                            }
+                            IconButton(onClick = { onRemoveHistory(entry.query) }) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Remove",
+                                    tint = CookiesmoTextMuted,
+                                )
+                            }
                         }
                     }
                 }
@@ -1165,9 +1336,61 @@ fun SearchScreenContent(
 @Composable
 fun BookmarksScreenContent(
     bookmarks: List<BookmarkedVideo>,
+    folders: List<MediaFolder>,
     onOpen: (BookmarkedVideo) -> Unit,
+    onDelete: (String) -> Unit,
+    onMoveToFolder: (id: String, folderId: String?) -> Unit,
+    onCreateFolder: (String) -> Unit,
+    onDeleteFolder: (String) -> Unit,
 ) {
     val context = LocalContext.current
+    var openFolderId by remember { mutableStateOf<String?>(null) }
+    var browsingFolder by remember { mutableStateOf(false) }
+    var showCreate by remember { mutableStateOf(false) }
+    var moveTargetId by remember { mutableStateOf<String?>(null) }
+
+    // Root list = only unfiled. Folder members leave the main list until you open that folder.
+    val unfiled = remember(bookmarks) { bookmarks.filter { it.folderId == null } }
+    val visible = remember(bookmarks, openFolderId, browsingFolder) {
+        if (!browsingFolder) {
+            unfiled
+        } else if (openFolderId == null) {
+            unfiled
+        } else {
+            bookmarks.filter { it.folderId == openFolderId }
+        }
+    }
+    val folderCounts = remember(bookmarks, folders) {
+        folders.associate { f -> f.id to bookmarks.count { it.folderId == f.id } }
+    }
+    val unfiledCount = unfiled.size
+    val folderTitle = folders.firstOrNull { it.id == openFolderId }?.name
+
+    if (showCreate) {
+        CreateFolderDialog(
+            title = "New saved folder",
+            onDismiss = { showCreate = false },
+            onCreate = { name ->
+                onCreateFolder(name)
+                showCreate = false
+                Toast.makeText(context, "Folder created", Toast.LENGTH_SHORT).show()
+            },
+        )
+    }
+    moveTargetId?.let { videoId ->
+        FolderPickerDialog(
+            title = "Move to folder",
+            folders = folders,
+            rootLabel = "Unfiled (no folder)",
+            onDismiss = { moveTargetId = null },
+            onPick = { folderId ->
+                onMoveToFolder(videoId, folderId)
+                moveTargetId = null
+                Toast.makeText(context, "Moved", Toast.LENGTH_SHORT).show()
+            },
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1180,8 +1403,27 @@ fun BookmarksScreenContent(
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (browsingFolder) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clickable {
+                            browsingFolder = false
+                            openFolderId = null
+                        }
+                        .padding(end = 4.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
             Text(
-                text = "Bookmarks",
+                text = if (browsingFolder) {
+                    folderTitle ?: "Unfiled"
+                } else {
+                    "Saved"
+                },
                 color = Color.White,
                 fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
@@ -1189,34 +1431,70 @@ fun BookmarksScreenContent(
             )
         }
 
-        if (bookmarks.isEmpty()) {
-            Box(
+        if (!browsingFolder) {
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(24.dp),
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                FolderListHeader(
+                    folders = folders,
+                    counts = folderCounts,
+                    unfiledCount = unfiledCount,
+                    onOpenRoot = {
+                        openFolderId = null
+                        browsingFolder = true
+                    },
+                    onOpenFolder = { f ->
+                        openFolderId = f.id
+                        browsingFolder = true
+                    },
+                    onCreateFolder = { showCreate = true },
+                    onDeleteFolder = { f ->
+                        onDeleteFolder(f.id)
+                        Toast.makeText(context, "Folder deleted", Toast.LENGTH_SHORT).show()
+                    },
+                )
+                if (bookmarks.isEmpty()) {
+                    Text(
+                        text = "No bookmarks yet.\nTap Bookmark on any video to save it here.",
+                        color = TextMetaBlue,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(24.dp),
+                    )
+                } else {
+                    Text(
+                        text = "${unfiledCount} unfiled · ${bookmarks.size - unfiledCount} in folders",
+                        color = TextMetaBlue,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp),
+                    )
+                    // Main list = unfiled only; moved items leave this list.
+                    if (unfiled.isEmpty()) {
+                        Text(
+                            text = "All saved videos are in folders.\nOpen a folder above to watch them.",
+                            color = TextMetaBlue,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        )
+                    } else {
+                        unfiled.forEach { item ->
+                            BookmarkRow(
+                                item = item,
+                                onOpen = { onOpen(item) },
+                                onMove = { moveTargetId = item.id },
+                                onDelete = { onDelete(item.id) },
+                            )
+                        }
+                    }
+                }
+            }
+        } else if (visible.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize().padding(24.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.BookmarkBorder,
-                        contentDescription = null,
-                        tint = TextMetaBlue,
-                        modifier = Modifier.size(48.dp),
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "No bookmarks yet",
-                        color = CookiesmoTextPrimary,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Tap Bookmark on any video to save it here\nacross all sources.",
-                        color = TextMetaBlue,
-                        fontSize = 13.sp,
-                    )
-                }
+                Text("No videos in this folder", color = TextMetaBlue, fontSize = 15.sp)
             }
         } else {
             Column(
@@ -1226,82 +1504,17 @@ fun BookmarksScreenContent(
                     .padding(vertical = 8.dp),
             ) {
                 Text(
-                    text = "${bookmarks.size} saved · all sources",
+                    text = "${visible.size} video(s)",
                     color = TextMetaBlue,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
                 )
-                bookmarks.forEach { item ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onOpen(item) }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .width(118.dp)
-                                .aspectRatio(16f / 10f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(CookiesmoSurface),
-                        ) {
-                            if (item.thumbnailUrl.isNotBlank()) {
-                                AsyncImage(
-                                    model = ImageRequest.Builder(context)
-                                        .data(item.thumbnailUrl)
-                                        .crossfade(true)
-                                        .build(),
-                                    contentDescription = item.title,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.Bookmark,
-                                    contentDescription = null,
-                                    tint = CookiesmoTextMuted.copy(alpha = 0.5f),
-                                    modifier = Modifier
-                                        .align(Alignment.Center)
-                                        .size(28.dp),
-                                )
-                            }
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = item.title,
-                                color = CookiesmoTextPrimary,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Spacer(modifier = Modifier.height(5.dp))
-                            Text(
-                                text = listOfNotNull(
-                                    item.sourceLabel.takeIf { it.isNotBlank() },
-                                    item.duration.takeIf { it.isNotBlank() && it != "—" },
-                                    item.resolution.takeIf { it.isNotBlank() },
-                                ).joinToString(" · ").ifBlank { "Saved video" },
-                                color = CookiesmoTextMuted,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowRight,
-                            contentDescription = null,
-                            tint = CookiesmoTextMuted,
-                            modifier = Modifier.padding(start = 4.dp),
-                        )
-                    }
-                    HorizontalDivider(
-                        color = CookiesmoMuted.copy(alpha = 0.5f),
-                        modifier = Modifier.padding(start = 142.dp),
+                visible.forEach { item ->
+                    BookmarkRow(
+                        item = item,
+                        onOpen = { onOpen(item) },
+                        onMove = { moveTargetId = item.id },
+                        onDelete = { onDelete(item.id) },
                     )
                 }
             }
@@ -1310,8 +1523,120 @@ fun BookmarksScreenContent(
 }
 
 @Composable
+private fun BookmarkRow(
+    item: BookmarkedVideo,
+    onOpen: () -> Unit,
+    onMove: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val context = LocalContext.current
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpen)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(118.dp)
+                    .aspectRatio(16f / 10f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(CookiesmoSurface),
+            ) {
+                val thumb = com.example.funfy.data.NetworkClient.sanitizeMediaUrl(
+                    item.thumbnailUrl,
+                )
+                if (thumb.isNotBlank()) {
+                    AsyncImage(
+                        model = ImageRequest.Builder(context.applicationContext)
+                            .data(thumb)
+                            // Key off URL so Coil reloads when repair updates the thumb.
+                            .memoryCacheKey(thumb)
+                            .diskCacheKey(thumb)
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = item.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Bookmark,
+                        contentDescription = null,
+                        tint = CookiesmoTextMuted.copy(alpha = 0.5f),
+                        modifier = Modifier.align(Alignment.Center).size(28.dp),
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = item.title,
+                    color = CookiesmoTextPrimary,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(modifier = Modifier.height(5.dp))
+                Text(
+                    text = listOfNotNull(
+                        item.sourceLabel.takeIf { it.isNotBlank() },
+                        item.duration.takeIf { it.isNotBlank() && it != "—" },
+                        item.resolution.takeIf { it.isNotBlank() },
+                    ).joinToString(" · ").ifBlank { "Saved video" },
+                    color = CookiesmoTextMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = CookiesmoSurface,
+                        border = BorderStroke(1.dp, CookiesmoMuted),
+                        modifier = Modifier.clickable(onClick = onMove),
+                    ) {
+                        Text(
+                            text = "Move",
+                            color = CookiesmoTextPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = CookiesmoSurface,
+                        border = BorderStroke(1.dp, Color(0xFFEF4444)),
+                        modifier = Modifier.clickable(onClick = onDelete),
+                    ) {
+                        Text(
+                            text = "Delete",
+                            color = Color(0xFFEF4444),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
+                }
+            }
+        }
+        HorizontalDivider(
+            color = CookiesmoMuted.copy(alpha = 0.5f),
+            modifier = Modifier.padding(start = 142.dp),
+        )
+    }
+}
+
+@Composable
 fun DownloadsScreenContent(
     downloads: List<LocalDownload>,
+    folders: List<MediaFolder> = emptyList(),
     transfers: List<DownloadTransfer>,
     onOpen: (LocalDownload) -> Unit,
     onDelete: (String) -> Unit,
@@ -1319,16 +1644,61 @@ fun DownloadsScreenContent(
     onCancel: (String) -> Unit,
     onRetry: (String) -> Unit,
     onDismissTransfer: (String) -> Unit,
+    onMoveToFolder: (id: String, folderId: String?) -> Unit = { _, _ -> },
+    onCreateFolder: (String) -> Unit = {},
+    onDeleteFolder: (String) -> Unit = {},
     onSaveToGallery: (LocalDownload) -> Unit = {},
 ) {
     val context = LocalContext.current
     val pendingTransfers = transfers.filter { it.status != DownloadStatus.COMPLETED }
+    var openFolderId by remember { mutableStateOf<String?>(null) }
+    var browsingFolder by remember { mutableStateOf(false) }
+    var showCreate by remember { mutableStateOf(false) }
+    var moveTargetId by remember { mutableStateOf<String?>(null) }
+
+    // Root list = only unfiled. Folder members leave the main list until you open that folder.
+    val unfiled = remember(downloads) { downloads.filter { it.folderId == null } }
+    val visible = remember(downloads, openFolderId, browsingFolder) {
+        if (!browsingFolder) unfiled
+        else if (openFolderId == null) unfiled
+        else downloads.filter { it.folderId == openFolderId }
+    }
+    val folderCounts = remember(downloads, folders) {
+        folders.associate { f -> f.id to downloads.count { it.folderId == f.id } }
+    }
+    val unfiledCount = unfiled.size
+    val folderTitle = folders.firstOrNull { it.id == openFolderId }?.name
+
+    if (showCreate) {
+        CreateFolderDialog(
+            title = "New downloads folder",
+            onDismiss = { showCreate = false },
+            onCreate = { name ->
+                onCreateFolder(name)
+                showCreate = false
+                Toast.makeText(context, "Folder created", Toast.LENGTH_SHORT).show()
+            },
+        )
+    }
+    moveTargetId?.let { videoId ->
+        FolderPickerDialog(
+            title = "Move to folder",
+            folders = folders,
+            rootLabel = "Unfiled (no folder)",
+            onDismiss = { moveTargetId = null },
+            onPick = { folderId ->
+                onMoveToFolder(videoId, folderId)
+                moveTargetId = null
+                Toast.makeText(context, "Moved", Toast.LENGTH_SHORT).show()
+            },
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(DetailBgLike)
     ) {
-        // Header bar like reference
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1336,14 +1706,29 @@ fun DownloadsScreenContent(
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (browsingFolder) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clickable {
+                            browsingFolder = false
+                            openFolderId = null
+                        }
+                        .padding(end = 4.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
             Text(
-                text = "Downloads",
+                text = if (browsingFolder) folderTitle ?: "Unfiled" else "Downloads",
                 color = Color.White,
                 fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f),
             )
-            if (downloads.isNotEmpty()) {
+            if (!browsingFolder && downloads.isNotEmpty()) {
                 Icon(
                     imageVector = Icons.Default.Delete,
                     contentDescription = "Clear all",
@@ -1355,18 +1740,42 @@ fun DownloadsScreenContent(
             }
         }
 
-        if (downloads.isEmpty() && pendingTransfers.isEmpty()) {
-            Box(
+        if (downloads.isEmpty() && pendingTransfers.isEmpty() && !browsingFolder) {
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(24.dp),
-                contentAlignment = Alignment.Center,
+                    .verticalScroll(rememberScrollState()),
             ) {
-                Text(
-                    text = "No downloaded video yet",
-                    color = TextMetaBlue,
-                    fontSize = 16.sp,
+                FolderListHeader(
+                    folders = folders,
+                    counts = folderCounts,
+                    unfiledCount = unfiledCount,
+                    onOpenRoot = {
+                        openFolderId = null
+                        browsingFolder = true
+                    },
+                    onOpenFolder = { f ->
+                        openFolderId = f.id
+                        browsingFolder = true
+                    },
+                    onCreateFolder = { showCreate = true },
+                    onDeleteFolder = { f ->
+                        onDeleteFolder(f.id)
+                        Toast.makeText(context, "Folder deleted", Toast.LENGTH_SHORT).show()
+                    },
                 )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "No downloaded video yet",
+                        color = TextMetaBlue,
+                        fontSize = 16.sp,
+                    )
+                }
             }
         } else {
             Column(
@@ -1375,143 +1784,201 @@ fun DownloadsScreenContent(
                     .verticalScroll(rememberScrollState())
                     .padding(vertical = 8.dp),
             ) {
-                pendingTransfers.forEach { transfer ->
-                    DownloadTransferRow(
-                        transfer = transfer,
-                        onCancel = { onCancel(transfer.id) },
-                        onRetry = { onRetry(transfer.id) },
-                        onDismiss = { onDismissTransfer(transfer.id) },
+                if (!browsingFolder) {
+                    FolderListHeader(
+                        folders = folders,
+                        counts = folderCounts,
+                        unfiledCount = unfiledCount,
+                        onOpenRoot = {
+                            openFolderId = null
+                            browsingFolder = true
+                        },
+                        onOpenFolder = { f ->
+                            openFolderId = f.id
+                            browsingFolder = true
+                        },
+                        onCreateFolder = { showCreate = true },
+                        onDeleteFolder = { f ->
+                            onDeleteFolder(f.id)
+                            Toast.makeText(context, "Folder deleted", Toast.LENGTH_SHORT).show()
+                        },
                     )
                 }
-                if (pendingTransfers.isNotEmpty() && downloads.isNotEmpty()) {
-                    HorizontalDivider(
-                        color = TextMetaBlue.copy(alpha = 0.25f),
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    )
-                    Text(
-                        text = "Available offline",
-                        color = TextMetaBlue,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                    )
-                }
-                downloads.forEach { item ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onOpen(item) }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .width(120.dp)
-                                .aspectRatio(16f / 10f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(CookiesmoSurface),
-                        ) {
-                            val localThumb = item.thumbnailPath
-                                .takeIf { it.isNotBlank() }
-                                ?.let { path -> File(path.removePrefix("file://")) }
-                                ?.takeIf { it.isFile && it.length() > 0L }
-                            val thumbModel: Any? = when {
-                                localThumb != null -> localThumb
-                                item.thumbnailUrl.isNotBlank() ->
-                                    com.example.funfy.data.NetworkClient.sanitizeMediaUrl(
-                                        item.thumbnailUrl,
-                                    )
-                                else -> null
-                            }
-                            if (thumbModel != null) {
-                                AsyncImage(
-                                    model = ImageRequest.Builder(context)
-                                        .data(thumbModel)
-                                        .crossfade(true)
-                                        .build(),
-                                    contentDescription = item.title,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = null,
-                                    tint = CookiesmoTextMuted.copy(alpha = 0.45f),
-                                    modifier = Modifier
-                                        .align(Alignment.Center)
-                                        .size(32.dp),
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.width(12.dp))
-
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = item.title,
-                                color = CookiesmoTextPrimary,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = item.metaLine,
-                                color = CookiesmoTextMuted,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                val canSaveGallery = item.filePath.lowercase().let {
-                                    it.endsWith(".mp4") || it.endsWith(".webm") || it.endsWith(".mkv")
-                                }
-                                if (canSaveGallery) {
-                                    Surface(
-                                        shape = RoundedCornerShape(12.dp),
-                                        color = CookiesmoSurface,
-                                        border = BorderStroke(1.dp, CookiesmoMuted),
-                                        modifier = Modifier.clickable {
-                                            onSaveToGallery(item)
-                                        },
-                                    ) {
-                                        Text(
-                                            text = "Save to gallery",
-                                            color = CookiesmoTextPrimary,
-                                            fontFamily = FontFamily.Monospace,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            modifier = Modifier.padding(
-                                                horizontal = 10.dp,
-                                                vertical = 5.dp,
-                                            ),
-                                        )
-                                    }
-                                }
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = CookiesmoSurface,
-                                    border = BorderStroke(1.dp, Color(0xFFEF4444)),
-                                    modifier = Modifier.clickable { onDelete(item.id) },
-                                ) {
-                                    Text(
-                                        text = "Delete",
-                                        color = Color(0xFFEF4444),
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.padding(
-                                            horizontal = 10.dp,
-                                            vertical = 5.dp,
-                                        ),
-                                    )
-                                }
-                            }
-                        }
+                if (!browsingFolder) {
+                    pendingTransfers.forEach { transfer ->
+                        DownloadTransferRow(
+                            transfer = transfer,
+                            onCancel = { onCancel(transfer.id) },
+                            onRetry = { onRetry(transfer.id) },
+                            onDismiss = { onDismissTransfer(transfer.id) },
+                        )
                     }
+                    if (pendingTransfers.isNotEmpty() && downloads.isNotEmpty()) {
+                        HorizontalDivider(
+                            color = TextMetaBlue.copy(alpha = 0.25f),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
+                        Text(
+                            text = "Available offline",
+                            color = TextMetaBlue,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+                if (!browsingFolder && downloads.isNotEmpty()) {
+                    Text(
+                        text = "${unfiledCount} unfiled · ${downloads.size - unfiledCount} in folders",
+                        color = TextMetaBlue,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp),
+                    )
+                }
+                if (visible.isEmpty() && (browsingFolder || pendingTransfers.isEmpty())) {
+                    Text(
+                        text = if (browsingFolder) {
+                            "No videos in this folder"
+                        } else if (downloads.isNotEmpty()) {
+                            "All downloads are in folders.\nOpen a folder above to play them."
+                        } else {
+                            "No downloaded video yet"
+                        },
+                        color = TextMetaBlue,
+                        modifier = Modifier.padding(24.dp),
+                    )
+                }
+                visible.forEach { item ->
+                    DownloadItemRow(
+                        item = item,
+                        onOpen = { onOpen(item) },
+                        onMove = { moveTargetId = item.id },
+                        onDelete = { onDelete(item.id) },
+                        onSaveToGallery = { onSaveToGallery(item) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadItemRow(
+    item: LocalDownload,
+    onOpen: () -> Unit,
+    onMove: () -> Unit,
+    onDelete: () -> Unit,
+    onSaveToGallery: () -> Unit,
+) {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .width(120.dp)
+                .aspectRatio(16f / 10f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(CookiesmoSurface),
+        ) {
+            val localThumb = item.thumbnailPath
+                .takeIf { it.isNotBlank() }
+                ?.let { path -> File(path.removePrefix("file://")) }
+                ?.takeIf { it.isFile && it.length() > 0L }
+            val thumbModel: Any? = when {
+                localThumb != null -> localThumb
+                item.thumbnailUrl.isNotBlank() ->
+                    com.example.funfy.data.NetworkClient.sanitizeMediaUrl(item.thumbnailUrl)
+                else -> null
+            }
+            if (thumbModel != null) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(thumbModel)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = item.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = null,
+                    tint = CookiesmoTextMuted.copy(alpha = 0.45f),
+                    modifier = Modifier.align(Alignment.Center).size(32.dp),
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.title,
+                color = CookiesmoTextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = item.metaLine,
+                color = CookiesmoTextMuted,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                maxLines = 1,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = CookiesmoSurface,
+                    border = BorderStroke(1.dp, CookiesmoMuted),
+                    modifier = Modifier.clickable(onClick = onMove),
+                ) {
+                    Text(
+                        text = "Move",
+                        color = CookiesmoTextPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    )
+                }
+                val canSaveGallery = java.io.File(item.storagePath).exists() || java.io.File(item.filePath).exists()
+                if (canSaveGallery) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = CookiesmoSurface,
+                        border = BorderStroke(1.dp, CookiesmoMuted),
+                        modifier = Modifier.clickable(onClick = onSaveToGallery),
+                    ) {
+                        Text(
+                            text = "Gallery",
+                            color = CookiesmoTextPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
+                }
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = CookiesmoSurface,
+                    border = BorderStroke(1.dp, Color(0xFFEF4444)),
+                    modifier = Modifier.clickable(onClick = onDelete),
+                ) {
+                    Text(
+                        text = "Delete",
+                        color = Color(0xFFEF4444),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    )
                 }
             }
         }
@@ -1635,6 +2102,7 @@ fun MoreScreenContent(
     disablePreview: Boolean,
     onDisablePreviewChange: (Boolean) -> Unit,
     onClearDownloads: () -> Unit,
+    onAutoShuffleChanged: () -> Unit = {},
 ) {
     val scrollState = rememberScrollState()
     val context = LocalContext.current
@@ -1656,6 +2124,7 @@ fun MoreScreenContent(
     }
     var forceMp4 by remember(context) { mutableStateOf(AppSettings.forceMp4(context)) }
     var autoPlay by remember(context) { mutableStateOf(AppSettings.autoPlay(context)) }
+    var autoShuffle by remember(context) { mutableStateOf(AppSettings.autoShuffle(context)) }
     val currentIdentityLabel = stringResource(currentIdentity.labelRes)
     val versionName = remember(context) {
         runCatching {
@@ -1815,6 +2284,16 @@ fun MoreScreenContent(
             subtext = "Choose the provider used by Home and Search",
             trailing = currentSource.label,
             onClick = { showSourcePicker = true },
+        )
+        SettingsSwitchRow(
+            title = "Auto shuffle",
+            subtext = "Show a random order of videos on the home page",
+            checked = autoShuffle,
+            onCheckedChange = {
+                autoShuffle = it
+                AppSettings.setAutoShuffle(context, it)
+                onAutoShuffleChanged()
+            },
         )
         
         Spacer(modifier = Modifier.height(16.dp))

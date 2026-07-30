@@ -9,31 +9,42 @@ import java.io.File
 import java.io.FileInputStream
 
 /**
- * Saves an offline MP4 into the public Movies/Funfy gallery album
+ * Saves an offline MP4 or HLS bundle into the public Movies/Funfy gallery album
  * (Telegram-style “Save to gallery”).
  */
 object GallerySaver {
     /**
      * @return true when the file was written to the system gallery.
      */
-    fun saveVideo(context: Context, filePath: String, title: String): Result<Unit> = runCatching {
-        val source = File(filePath)
-        require(source.isFile && source.length() > 0L) { "Video file is missing" }
-        val lower = source.name.lowercase()
-        require(lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mkv")) {
-            "Only MP4 offline files can be saved to the gallery (HLS playlists cannot)."
-        }
+    fun saveVideo(
+        context: Context,
+        filePath: String,
+        title: String,
+        storagePath: String = filePath,
+    ): Result<Unit> = runCatching {
+        val fileOrDir = File(storagePath).takeIf { it.exists() } ?: File(filePath)
+        require(fileOrDir.exists()) { "Video download is missing" }
+
+        val isDirectory = fileOrDir.isDirectory
+        val lower = fileOrDir.name.lowercase()
+
         val mime = when {
             lower.endsWith(".webm") -> "video/webm"
             lower.endsWith(".mkv") -> "video/x-matroska"
             else -> "video/mp4"
         }
+        val ext = when {
+            lower.endsWith(".webm") -> ".webm"
+            lower.endsWith(".mkv") -> ".mkv"
+            else -> ".mp4"
+        }
+
         val safeName = title
             .replace(Regex("""[\\/:*?"<>|]"""), "_")
             .trim()
             .take(48)
             .ifBlank { "Funfy video" }
-        val displayName = if (safeName.contains('.')) safeName else "$safeName.mp4"
+        val displayName = if (safeName.endsWith(ext, ignoreCase = true)) safeName else "$safeName$ext"
 
         val resolver = context.contentResolver
         val values = ContentValues().apply {
@@ -58,7 +69,30 @@ object GallerySaver {
             ?: error("Could not create gallery entry")
         try {
             resolver.openOutputStream(uri)?.use { output ->
-                FileInputStream(source).use { input -> input.copyTo(output) }
+                if (isDirectory) {
+                    val segments = fileOrDir.walkTopDown()
+                        .filter { seg ->
+                            seg.isFile && (
+                                seg.extension.equals("ts", ignoreCase = true) ||
+                                    seg.extension.equals("mp4", ignoreCase = true) ||
+                                    seg.extension.equals("m4s", ignoreCase = true) ||
+                                    seg.name.contains("segment", ignoreCase = true) ||
+                                    seg.name.contains("seg", ignoreCase = true)
+                            )
+                        }
+                        .sortedWith(Comparator { f1, f2 ->
+                            val n1 = Regex("""\d+""").findAll(f1.name).lastOrNull()?.value?.toLongOrNull() ?: 0L
+                            val n2 = Regex("""\d+""").findAll(f2.name).lastOrNull()?.value?.toLongOrNull() ?: 0L
+                            n1.compareTo(n2)
+                        })
+                        .toList()
+                    require(segments.isNotEmpty()) { "No video segment files found in offline directory" }
+                    for (seg in segments) {
+                        FileInputStream(seg).use { input -> input.copyTo(output) }
+                    }
+                } else {
+                    FileInputStream(fileOrDir).use { input -> input.copyTo(output) }
+                }
             } ?: error("Could not open gallery stream")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 values.clear()

@@ -89,27 +89,108 @@ fun availableStreamQualities(streams: List<StreamOption>): List<StreamOption> {
 }
 
 /**
- * Default playback: prefer **480p**, then **360p**, then lower, then mid/high.
+ * Default playback: prefer **360p**, then **480p**, then lower, then mid/high.
  * Avoid starting on 720p/1080p unless that is all the site offers.
  */
 fun pickDefaultStream(streams: List<StreamOption>): StreamOption? {
-    val options = availableStreamQualities(streams)
+    val expanded = expandMultiQualityStreams(streams)
+    val options = availableStreamQualities(expanded)
     if (options.isEmpty()) {
-        return streams.firstOrNull { !it.label.equals("Embed", true) }
+        return expanded.firstOrNull { !it.label.equals("Embed", true) }
+            ?: expanded.firstOrNull()
             ?: streams.firstOrNull()
     }
-    // Preference order for first play (mobile-friendly).
-    val prefer = listOf(480, 360, 240, 144, 720, 1080, 1440, 2160, 1)
+    // Preference order for first play (mobile / weak networks).
+    val prefer = listOf(360, 480, 240, 144, 720, 1080, 1440, 2160, 1)
     for (tier in prefer) {
         options.firstOrNull { streamQualityRank(it.label) == tier }?.let { return it }
     }
-    // Closest to 480 without going above 720 if possible
+    // Closest to 360–480 without going above 720 when possible.
     val underHd = options.filter {
         val r = streamQualityRank(it.label)
         r in 144..720
     }
     if (underHd.isNotEmpty()) {
-        return underHd.minByOrNull { kotlin.math.abs(streamQualityRank(it.label) - 480) }
+        return underHd.minByOrNull { kotlin.math.abs(streamQualityRank(it.label) - 360) }
     }
     return options.lastOrNull() // lowest remaining
 }
+
+/**
+ * Expand multi-bitrate masters (xHamster / Beeg-style) into discrete quality URLs
+ * so the picker and default logic can start on 360p/480p instead of ABR-at-1080.
+ */
+fun expandMultiQualityStreams(streams: List<StreamOption>): List<StreamOption> {
+    if (streams.isEmpty()) return streams
+    val out = linkedMapOf<String, StreamOption>()
+    fun put(opt: StreamOption) {
+        val label = normalizeStreamQualityLabel(opt.label, opt.url)
+        val key = "${streamQualityRank(label)}|${opt.url}"
+        out.putIfAbsent(key, opt.copy(label = label))
+    }
+    for (opt in streams) {
+        val u = opt.url
+        val lower = u.lowercase()
+        val multiExpanded = expandMultiTemplateUrl(u)
+        if (multiExpanded.isNotEmpty()) {
+            multiExpanded.forEach(::put)
+            continue
+        }
+        // Progressive ladder: …/480p.h264.mp4, …/720p.h264.mp4 — keep as-is with correct label.
+        if (lower.contains("p.h264.mp4") || Regex("""/\d{3,4}p\.(?:h264|av1|mp4)""").containsMatchIn(lower)) {
+            put(opt.copy(label = NetworkClient.guessQualityLabel(u, opt.label)))
+            continue
+        }
+        put(opt)
+    }
+    return out.values
+        .distinctBy { it.url }
+        .sortedByDescending { streamQualityRank(it.label) }
+}
+
+/**
+ * xHamster multi masters look like:
+ * `…/multi=256x144:144p:,…,1920x1080:1080p:/path/_TPL_.av1.mp4.m3u8`
+ * Replace `_TPL_` with each tier so playback can pick a fixed low quality.
+ */
+private fun expandMultiTemplateUrl(url: String): List<StreamOption> {
+    if (!url.contains("_TPL_", ignoreCase = true) && !url.contains("multi=", ignoreCase = true)) {
+        return emptyList()
+    }
+    if (!url.contains(".m3u8", ignoreCase = true)) return emptyList()
+    val tiers = mutableListOf<Pair<String, Int>>()
+    // Capture labels listed after multi=
+    val multiSeg = Regex(
+        """multi=([^/]+)""",
+        RegexOption.IGNORE_CASE,
+    ).find(url)?.groupValues?.get(1).orEmpty()
+    if (multiSeg.isNotBlank()) {
+        Regex("""(\d{3,4})p""").findAll(multiSeg).forEach { m ->
+            val h = m.groupValues[1].toIntOrNull() ?: return@forEach
+            tiers += "${h}p" to h
+        }
+    }
+    if (tiers.isEmpty()) {
+        // Fallback common ladder
+        tiers += listOf("240p" to 240, "360p" to 360, "480p" to 480, "720p" to 720, "1080p" to 1080)
+    }
+    if (!url.contains("_TPL_", ignoreCase = true)) {
+        // Master without per-variant template — keep as Auto only.
+        return emptyList()
+    }
+    return tiers
+        .distinctBy { it.second }
+        .sortedBy { it.second }
+        .map { (label, _) ->
+            // Prefer h264 progressive-style variant name used by xhcdn when possible.
+            val tpl = if (url.contains(".av1.", true)) {
+                label // e.g. 480p inside av1 template
+            } else {
+                label
+            }
+            StreamOption(label, url.replace("_TPL_", tpl, ignoreCase = true))
+        }
+}
+
+/** Cap for adaptive HLS when the user has not picked a higher fixed quality. */
+const val DEFAULT_MAX_PLAYBACK_HEIGHT = 480

@@ -10,10 +10,11 @@ class SourceCatalogTest {
     fun eachRequestedRegion_hasExpectedDirectSites() {
         val expected = mapOf(
             SourceRegion.JAV to listOf(
-                "missav", "javfree", "javtsunami", "123av", "javseen",
+                "jable", "javmost", "javfree", "javtsunami", "123av", "javseen", "xasiat",
             ),
             SourceRegion.PHILIPPINES to listOf(
                 "pinayot", "pinayflix", "pornkai", "pinaypornsite",
+                "kaldagan", "pinayum", "lootedpinay", "pwerta",
             ),
             SourceRegion.INDONESIA to listOf(
                 "indo18", "bokepbox", "bokepindohot", "bebasindo", "nontonbokep",
@@ -25,7 +26,7 @@ class SourceCatalogTest {
                 "thaiporntv", "okxxx", "ixxx",
             ),
             SourceRegion.VIETNAM to listOf(
-                "vlxx", "sexhay24h", "quatvn",
+                "vlxx", "sexhay24h",
             ),
             SourceRegion.HENTAI to listOf(
                 "hanime", "hentaimama", "hentai4k", "rule34video", "hentaigasm", "hentaicity",
@@ -53,7 +54,7 @@ class SourceCatalogTest {
             "myanmar", "myanmar_eporner",
             "vietnam", "viet_eporner",
             "thai", "thai_eporner",
-            "javguru", "javff", "hentaihaven", "pinayviral", "shennana",
+            "javguru", "javff", "hentaihaven", "pinayviral", "shennana", "quatvn",
         )
         val ids = VideoSource.selectable.map { it.id }
         for (id in banned) {
@@ -74,18 +75,31 @@ class SourceCatalogTest {
         assertEquals(VideoSource.INDO18, VideoSource.fromId("indo18"))
         assertEquals(VideoSource.PORNKAI, VideoSource.fromId("pinayflixhd"))
         assertEquals(VideoSource.THAIPORNTV, VideoSource.fromId("thaipornxxx"))
-        assertEquals(VideoSource.QUATVN, VideoSource.fromId("vietnam"))
+        assertEquals(VideoSource.VLXX, VideoSource.fromId("vietnam"))
+        assertEquals(VideoSource.VLXX, VideoSource.fromId("quatvn"))
         assertEquals(VideoSource.INDO18, VideoSource.fromId("indonesia"))
         assertEquals(VideoSource.BUUMAL, VideoSource.fromId("myanmar"))
-        assertEquals(VideoSource.MISSAV, VideoSource.fromId("jav_xvideos"))
-        assertEquals(VideoSource.MISSAV, VideoSource.fromId("javguru"))
+        assertEquals(VideoSource.JABLE, VideoSource.fromId("jav_xvideos"))
+        assertEquals(VideoSource.JABLE, VideoSource.fromId("javguru"))
+        assertEquals(VideoSource.JABLE, VideoSource.fromId("missav"))
         assertEquals(VideoSource.JAVTSUNAMI, VideoSource.fromId("javff"))
         assertEquals(VideoSource.HENTAIMAMA, VideoSource.fromId("hentaihaven"))
         assertEquals(VideoSource.PINAYFLIX, VideoSource.fromId("pinayviral"))
         assertEquals(VideoSource.BOKEPBOX, VideoSource.fromId("bokepbox"))
         assertEquals(VideoSource.DEFAULT, VideoSource.fromId("xnxx"))
-        assertEquals(VideoSource.QUATVN, VideoSource.fromId("shennana"))
+        assertEquals(VideoSource.VLXX, VideoSource.fromId("shennana"))
         assertEquals(VideoSource.OKXXX, VideoSource.fromId("okxxx"))
+        assertEquals(VideoSource.XHAMSTER2, VideoSource.fromId("xhamster2"))
+        assertEquals(VideoSource.XASIAT, VideoSource.fromId("xasiat"))
+        assertEquals(VideoSource.KALDAGAN, VideoSource.fromId("kaldagan"))
+    }
+
+    @Test
+    fun newGlobalSources_areSelectable() {
+        val ids = VideoSource.selectable.map { it.id }
+        for (id in listOf("xhamster2", "beeg", "txxx", "xxxfiles", "xasiat")) {
+            assertTrue("Missing selectable source: $id", id in ids)
+        }
     }
 
     @Test
@@ -122,5 +136,19 @@ class SourceCatalogTest {
         val streams = extractCleanTubeStreams(html)
         assertTrue(streams.isNotEmpty())
         assertTrue(streams.any { it.url.contains("drkogyi.vip") && it.url.endsWith(".mp4") })
+    }
+
+    @Test
+    fun xHamster_extractsJsonEscapedStreams() {
+        val html = """
+            {"hls":"https:\/\/video-nss.xhcdn.com\/media=hls4\/multi=426x240:240p,854x480:480p\/_TPL_.h264.mp4.m3u8",
+             "480p":"https:\/\/video5.xhcdn.com\/key=test\/030\/284\/576\/480p.h264.mp4"}
+        """.trimIndent()
+
+        val streams = XHamster2Client().collectXhStreams(html)
+
+        assertTrue(streams.any { it.label == "240p" && it.url.endsWith("240p.h264.mp4.m3u8") })
+        assertTrue(streams.any { it.label == "480p" && it.url.endsWith("480p.h264.mp4") })
+        assertTrue(streams.all { "\\/" !in it.url })
     }
 }

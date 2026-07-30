@@ -4,8 +4,10 @@ import android.app.Activity
 import android.content.res.Configuration
 import android.content.pm.ActivityInfo
 import android.net.Uri
+import android.os.Build
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -46,6 +48,8 @@ import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.ScreenRotation
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
@@ -53,6 +57,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import com.example.funfy.ads.NativeAdCard
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
@@ -64,6 +69,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -96,10 +102,14 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
@@ -108,10 +118,13 @@ import com.example.funfy.AppSettings
 import com.example.funfy.FunfyApp
 import com.example.funfy.LoopMode
 import com.example.funfy.data.BookmarkedVideo
+import com.example.funfy.data.DEFAULT_MAX_PLAYBACK_HEIGHT
 import com.example.funfy.data.DownloadStatus
 import com.example.funfy.data.NetworkClient
 import com.example.funfy.data.StreamOption
+import com.example.funfy.data.ThumbnailResolver
 import com.example.funfy.data.availableStreamQualities
+import com.example.funfy.data.expandMultiQualityStreams
 import com.example.funfy.data.normalizeStreamQualityLabel
 import com.example.funfy.data.pickDefaultStream
 import com.example.funfy.data.streamQualityRank
@@ -119,6 +132,7 @@ import com.example.funfy.data.VideoDetails
 import com.example.funfy.data.VideoItem
 import com.example.funfy.theme.*
 import com.example.funfy.data.VideoSource
+import com.example.funfy.ui.main.FolderPickerDialog
 import androidx.compose.ui.text.font.FontFamily
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -162,7 +176,10 @@ private fun isHlsUrl(url: String): Boolean {
   val path = url.substringBefore('?').substringBefore('#')
   return path.endsWith(".m3u8", ignoreCase = true) ||
     path.endsWith(".vl", ignoreCase = true) || // VLXX / vlstream manifests
-    (path.contains("/manifest", ignoreCase = true) && path.contains("qooglevideo", ignoreCase = true))
+    (path.contains("/manifest", ignoreCase = true) && path.contains("qooglevideo", ignoreCase = true)) ||
+    url.contains(".m3u8", ignoreCase = true) ||
+    url.contains("/hls/", ignoreCase = true) ||
+    url.contains("master.m3u8", ignoreCase = true)
 }
 
 private fun isDirectMp4Url(url: String): Boolean =
@@ -170,6 +187,50 @@ private fun isDirectMp4Url(url: String): Boolean =
 
 private fun isDirectMp4Stream(option: StreamOption): Boolean =
   isDirectMp4Url(option.url) || option.label.contains("MP4", ignoreCase = true)
+
+/** Site logos / short random CDN names are weak covers compared to listing thumbs. */
+private fun isWeakThumbnailUrl(url: String): Boolean {
+  val name = url.substringAfterLast('/').substringBefore('?')
+  if (name.isBlank()) return true
+  // e.g. KQ8DqkW.jpg / H88PeKs.png — generic assets, not video covers
+  if (Regex("""^[A-Za-z0-9]{4,12}\.(jpe?g|png|webp)$""", RegexOption.IGNORE_CASE).matches(name)) {
+    return true
+  }
+  val lower = url.lowercase()
+  return lower.contains("logo") || lower.contains("favicon") || lower.contains("sprite") ||
+    lower.contains("placeholder") || lower.contains("preload")
+}
+
+/**
+ * Retry HLS segment / progressive chunk loads on CDN rate limits (HTTP 429/5xx)
+ * instead of failing the whole playback immediately.
+ */
+@OptIn(UnstableApi::class)
+private fun rateLimitLoadErrorPolicy(): LoadErrorHandlingPolicy {
+  return object : DefaultLoadErrorHandlingPolicy(/* minimumLoadableRetryCount = */ 8) {
+    override fun getRetryDelayMsFor(
+      loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo,
+    ): Long {
+      val ex = loadErrorInfo.exception
+      if (ex is HttpDataSource.InvalidResponseCodeException) {
+        when (ex.responseCode) {
+          429, 502, 503 -> {
+            val retryAfterSec = ex.headerFields["Retry-After"]
+              ?.firstOrNull()
+              ?.toLongOrNull()
+            if (retryAfterSec != null) {
+              return (retryAfterSec * 1000L).coerceIn(500L, 20_000L)
+            }
+            // 1s, 2s, 4s, 8s… capped
+            val exp = 1_000L * (1L shl loadErrorInfo.errorCount.coerceAtMost(4))
+            return exp.coerceAtMost(12_000L)
+          }
+        }
+      }
+      return super.getRetryDelayMsFor(loadErrorInfo)
+    }
+  }
+}
 
 @OptIn(UnstableApi::class, ExperimentalLayoutApi::class)
 @Composable
@@ -182,6 +243,10 @@ fun PlayerScreen(
   uploader: String = "",
   thumbnailUrl: String = "",
   isLocal: Boolean = false,
+  /** Resume after leaving for a related video (ms). */
+  initialPositionMs: Long = 0L,
+  /** Persist progress so the previous video resumes when navigating related → back. */
+  onProgressSave: (Long) -> Unit = {},
   onBack: () -> Unit,
   onRelatedClick: (VideoItem) -> Unit = {},
   /** Notifies host (MainScreen) so the bottom navbar can hide in immersive fullscreen. */
@@ -194,6 +259,8 @@ fun PlayerScreen(
   val app = context.applicationContext as FunfyApp
   val transfers by app.downloadStore.transfers.collectAsStateWithLifecycle()
   val bookmarks by app.bookmarkStore.bookmarks.collectAsStateWithLifecycle()
+  val bookmarkFolders by app.bookmarkStore.folders.collectAsStateWithLifecycle()
+  val downloadFolders by app.downloadStore.folders.collectAsStateWithLifecycle()
   val autoPlayEnabled = remember(context, pageUrl) { AppSettings.autoPlay(context) }
   val loopMode = remember(context, pageUrl) { AppSettings.loopMode(context) }
   val fullscreenOnRotation = remember(context, pageUrl) {
@@ -216,26 +283,40 @@ fun PlayerScreen(
       it.id == com.example.funfy.data.BookmarkStore.stableId(pageUrl)
   }
   var isFullscreen by remember { mutableStateOf(false) }
+  var isLandscapeFullscreen by remember { mutableStateOf(false) }
   var useEmbed by remember { mutableStateOf(false) }
-  var playbackSpeed by remember { mutableStateOf(1.0f) }
+  var playbackSpeed by remember(pageUrl) { mutableFloatStateOf(1.0f) }
+  var showMoreClicks by remember(pageUrl) { mutableIntStateOf(0) }
   var renderedVideoSize by remember(pageUrl) { mutableStateOf<VideoSize?>(null) }
   var currentDownloadId by remember(pageUrl) { mutableStateOf<String?>(null) }
   var capturedMediaUrl by remember { mutableStateOf<String?>(null) }
   val currentTransfer = currentDownloadId?.let { id -> transfers.firstOrNull { it.id == id } }
   val downloadBusy = currentTransfer?.isActive == true
 
+  val trackSelector = remember(pageUrl) {
+    DefaultTrackSelector(context).apply {
+      // Start adaptive HLS at ≤480p so new / slow CDNs don't open on 1080p.
+      parameters = buildUponParameters()
+        .setMaxVideoSize(854, DEFAULT_MAX_PLAYBACK_HEIGHT)
+        .setForceHighestSupportedBitrate(false)
+        .build()
+    }
+  }
+
   val exoPlayer = remember(pageUrl) {
-    // Start playback as soon as ~0.5s is buffered; keep a healthy readahead after that.
+    // Progressive hosts (LootedPinay ~180MB moov-at-end mp4) need a healthier
+    // rebuffer floor so tiny readaheads don't thrash into permanent buffering.
     val loadControl = DefaultLoadControl.Builder()
       .setBufferDurationsMs(
         /* minBufferMs */ 15_000,
         /* maxBufferMs */ 50_000,
-        /* bufferForPlaybackMs */ 500,
-        /* bufferForPlaybackAfterRebufferMs */ 1_000,
+        /* bufferForPlaybackMs */ 750,
+        /* bufferForPlaybackAfterRebufferMs */ 2_500,
       )
       .setPrioritizeTimeOverSizeThresholds(true)
       .build()
     ExoPlayer.Builder(context)
+      .setTrackSelector(trackSelector)
       .setLoadControl(loadControl)
       .build()
       .apply {
@@ -247,6 +328,31 @@ fun PlayerScreen(
         }
       }
   }
+
+  fun applyPlaybackQualityCap(option: StreamOption) {
+    val rank = streamQualityRank(option.label)
+    val maxH = when {
+      rank in 1..1 -> DEFAULT_MAX_PLAYBACK_HEIGHT // Auto → 480p cap
+      rank <= 0 -> DEFAULT_MAX_PLAYBACK_HEIGHT
+      rank in 144..480 -> rank.coerceAtLeast(240)
+      rank in 481..720 -> 720
+      rank > 720 -> rank
+      else -> DEFAULT_MAX_PLAYBACK_HEIGHT
+    }
+    val maxW = when {
+      maxH <= 360 -> 640
+      maxH <= 480 -> 854
+      maxH <= 720 -> 1280
+      maxH <= 1080 -> 1920
+      else -> Int.MAX_VALUE
+    }
+    trackSelector.parameters = trackSelector.buildUponParameters()
+      .setMaxVideoSize(maxW, maxH)
+      .setForceHighestSupportedBitrate(false)
+      .build()
+  }
+
+
 
   fun playStream(option: StreamOption, resumePosition: Long = 0L) {
     val shouldPlay = if (selectedStream == null) autoPlayEnabled else exoPlayer.playWhenReady
@@ -262,6 +368,8 @@ fun PlayerScreen(
       loading = false
       return
     }
+
+    applyPlaybackQualityCap(option)
 
     val pos = if (resumePosition > 0) resumePosition else exoPlayer.currentPosition.coerceAtLeast(0L)
     val mediaItem = MediaItem.fromUri(option.url)
@@ -279,7 +387,7 @@ fun PlayerScreen(
       exoPlayer.prepare()
     } else {
       val lowerUrl = option.url.lowercase()
-      val pageRef = NetworkClient.siteReferer(pageUrl)
+      val pageRef = NetworkClient.mediaReferer(option.url, pageUrl)
       val referer = when {
         lowerUrl.contains("goostream") || lowerUrl.contains("corecache") ||
           lowerUrl.contains("flixtream") -> "https://flixtream.top/"
@@ -295,10 +403,21 @@ fun PlayerScreen(
         lowerUrl.contains("playerwish") || lowerUrl.contains("strwish") ||
           lowerUrl.contains("streamwish") || lowerUrl.contains("hlswish") ||
           lowerUrl.contains("swishsrv") || lowerUrl.contains("premilkyway") ||
-          lowerUrl.contains("retailinfrastructure") || lowerUrl.contains("hicherri") ||
-          lowerUrl.contains("turbovid") -> "https://playerwish.com/"
+          lowerUrl.contains("retailinfrastructure") || lowerUrl.contains("hicherri") ->
+          "https://playerwish.com/"
+        lowerUrl.contains("turbovid") || lowerUrl.contains("turboviplay") ->
+          "https://turbovidhls.com/"
+        lowerUrl.contains("cloudatacdn") || lowerUrl.contains("doodcdn") ||
+          lowerUrl.contains("playmogo") || lowerUrl.contains("doodstream") ->
+          "https://playmogo.com/"
+        lowerUrl.contains("200cdn") || lowerUrl.contains("303in") ->
+          "https://embed.200cdn.top/"
         lowerUrl.contains("surrit.com") || lowerUrl.contains("fourhoi.com") ->
           "https://missav.ws/"
+        lowerUrl.contains("jable") || lowerUrl.contains("cdn-cf-east") ->
+          "https://jable.tv/"
+        lowerUrl.contains("javmost") || lowerUrl.contains("supjav") ->
+          "https://www.javmost.ws/"
         lowerUrl.contains("mmhd-cdn") || lowerUrl.contains("mmhdhub") ||
           lowerUrl.contains("dl.mmhdhub") -> "https://mmhdhub.com/"
         lowerUrl.contains("gdvid.info") || lowerUrl.contains("javprovider.com") ->
@@ -308,28 +427,58 @@ fun PlayerScreen(
           else "https://www.sexvid.xxx/"
         lowerUrl.contains("analdin") -> "https://www.analdin.com/"
         lowerUrl.contains("eporner") -> "https://www.eporner.com/"
+        // New sources — correct Origin/Referer avoids CDN stalls / 403 retries.
+        lowerUrl.contains("xhcdn") || lowerUrl.contains("xhamster") -> "https://xhamster2.com/"
+        lowerUrl.contains("ahacdn") || lowerUrl.contains("externulls") || lowerUrl.contains("beeg") ->
+          "https://beeg.com/"
+        lowerUrl.contains("txxx") || lowerUrl.contains("txxx.tube") -> "https://txxx.com/"
+        lowerUrl.contains("xxxfiles") || lowerUrl.contains("porngo") -> "https://www.xxxfiles.com/"
+        lowerUrl.contains("xasiat") || lowerUrl.contains("xascdn") -> "https://www.xasiat.com/"
+        // PH WordPress Clean Tube (LootedPinay etc.) — host on pinaydeepweb.xyz
+        lowerUrl.contains("pinaydeepweb") || lowerUrl.contains("lootedpinay") ||
+          lowerUrl.contains("kaldagan") || pageUrl.contains("lootedpinay", true) ||
+          pageUrl.contains("kaldagan", true) ->
+          if (pageUrl.contains("kaldagan", true)) "https://kaldagan.com/"
+          else "https://lootedpinay.com/"
+        lowerUrl.contains("video.beeg") || lowerUrl.contains("ahacdn.me") &&
+          pageUrl.contains("beeg", true) -> "https://beeg.com/"
+        lowerUrl.contains("beeg") || lowerUrl.contains("externulls") -> "https://beeg.com/"
+        lowerUrl.contains("xxxfiles") || lowerUrl.contains("porngo") ||
+          lowerUrl.contains("ahcdn.com") && pageUrl.contains("xxxfiles", true) ->
+          "https://www.xxxfiles.com/"
+        lowerUrl.contains("pinayum") || lowerUrl.contains("xtremestream") -> "https://pinayum.cc/"
+        lowerUrl.contains("pwerta") || lowerUrl.contains("rubyvid") ||
+          lowerUrl.contains("bigwarp") || lowerUrl.contains("savefiles") ->
+          "https://pwerta.com/"
         else -> pageRef
+      }
+      // Progressive WP hosts dislike Origin and stall; HLS still needs it sometimes.
+      val isProgressiveMp4 = lowerUrl.contains(".mp4") && !lowerUrl.contains(".m3u8")
+      val defaultProps = buildMap {
+        put("Referer", referer)
+        put("Accept", "*/*")
+        put("Accept-Encoding", "identity")
+        if (!isProgressiveMp4) {
+          put("Origin", referer.trimEnd('/'))
+        }
       }
       val httpFactory = DefaultHttpDataSource.Factory()
         .setUserAgent(NetworkClient.USER_AGENT)
         .setAllowCrossProtocolRedirects(true)
-        .setConnectTimeoutMs(12_000)
-        .setReadTimeoutMs(20_000)
-        .setDefaultRequestProperties(
-          mapOf(
-            "Referer" to referer,
-            "Origin" to referer.trimEnd('/'),
-            "Accept" to "*/*",
-            "Accept-Encoding" to "identity",
-          ),
-        )
+        .setConnectTimeoutMs(15_000)
+        .setReadTimeoutMs(30_000)
+        .setDefaultRequestProperties(defaultProps)
+      // Retry 429/5xx on HLS segments and progressive chunks instead of failing immediately.
+      val loadPolicy = rateLimitLoadErrorPolicy()
       val mediaSource = if (
         isHlsUrl(option.url) ||
         option.url.contains(".m3u8", ignoreCase = true) ||
         option.label.contains("HLS", ignoreCase = true) ||
         option.label.equals("Auto", ignoreCase = true)
       ) {
-        HlsMediaSource.Factory(httpFactory).createMediaSource(mediaItem)
+        HlsMediaSource.Factory(httpFactory)
+          .setLoadErrorHandlingPolicy(loadPolicy)
+          .createMediaSource(mediaItem)
       } else if (FastStartDataSource.shouldTryFastStart(option.url)) {
         // moov-at-end progressive MP4s (MMPorns/DrKoGyi): virtual fast-start layout.
         ProgressiveMediaSource.Factory(
@@ -337,9 +486,13 @@ fun PlayerScreen(
             userAgent = NetworkClient.USER_AGENT,
             defaultReferer = referer,
           ),
-        ).createMediaSource(mediaItem)
+        )
+          .setLoadErrorHandlingPolicy(loadPolicy)
+          .createMediaSource(mediaItem)
       } else {
-        ProgressiveMediaSource.Factory(httpFactory).createMediaSource(mediaItem)
+        ProgressiveMediaSource.Factory(httpFactory)
+          .setLoadErrorHandlingPolicy(loadPolicy)
+          .createMediaSource(mediaItem)
       }
       exoPlayer.setMediaSource(mediaSource)
       exoPlayer.prepare()
@@ -351,20 +504,39 @@ fun PlayerScreen(
     exoPlayer.playWhenReady = shouldPlay
   }
 
-  fun setFullscreen(enabled: Boolean, lockOrientation: Boolean = true) {
+  fun setFullscreen(enabled: Boolean, lockOrientation: Boolean = true, forceLandscape: Boolean = false) {
     isFullscreen = enabled
     onFullscreenChange(enabled)
     // Reset pinch zoom when leaving fullscreen so the next session starts clean.
     if (!enabled) {
       playerScale = 1f
       playerOffset = Offset.Zero
+      isLandscapeFullscreen = false
     }
     val act = activity ?: return
     val window = act.window
     val controller = WindowInsetsControllerCompat(window, window.decorView)
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      window.attributes = window.attributes.apply {
+        layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+      }
+    }
+    window.statusBarColor = android.graphics.Color.BLACK
+    window.navigationBarColor = android.graphics.Color.BLACK
+    window.decorView.setBackgroundColor(android.graphics.Color.BLACK)
+    controller.isAppearanceLightStatusBars = false
+    controller.isAppearanceLightNavigationBars = false
+
     if (enabled) {
       if (lockOrientation) {
-        act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        if (forceLandscape) {
+          isLandscapeFullscreen = true
+          act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+          isLandscapeFullscreen = false
+          act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
       }
       WindowCompat.setDecorFitsSystemWindows(window, false)
       controller.hide(WindowInsetsCompat.Type.systemBars())
@@ -379,7 +551,22 @@ fun PlayerScreen(
     }
   }
 
-  fun enqueueDownload(option: StreamOption) {
+  fun toggleFullscreenOrientation() {
+    val act = activity ?: return
+    if (isLandscapeFullscreen) {
+      isLandscapeFullscreen = false
+      act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    } else {
+      isLandscapeFullscreen = true
+      act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+    }
+  }
+
+  var pendingDownloadOption by remember { mutableStateOf<StreamOption?>(null) }
+  var showDownloadFolderPicker by remember { mutableStateOf(false) }
+  var showBookmarkFolderPicker by remember { mutableStateOf(false) }
+
+  fun startDownload(option: StreamOption, folderId: String?) {
     if (downloadBusy) return
     if (option.label.equals("Embed", ignoreCase = true) && capturedMediaUrl == null) {
       Toast.makeText(
@@ -407,14 +594,70 @@ fun PlayerScreen(
       resolution = resLabel,
       duration = details?.duration ?: duration,
       thumbnailUrl = NetworkClient.sanitizeMediaUrl(
-        details?.thumbnailUrl?.takeIf { it.isNotBlank() } ?: thumbnailUrl,
+        listOf(thumbnailUrl, details?.thumbnailUrl.orEmpty())
+          .firstOrNull { it.isNotBlank() && !isWeakThumbnailUrl(it) }
+          ?: thumbnailUrl.ifBlank { details?.thumbnailUrl.orEmpty() },
       ),
       referer = if (isLocal) pageUrl else NetworkClient.siteReferer(pageUrl),
+      folderId = folderId,
     )
     val sizeHint = option.sizeBytes?.takeIf { it > 0 }?.let {
       " · ${StreamOption.formatBytes(it)}"
     }.orEmpty()
-    Toast.makeText(context, "Downloading $resLabel$sizeHint…", Toast.LENGTH_SHORT).show()
+    val folderHint = folderId
+      ?.let { fid -> downloadFolders.firstOrNull { it.id == fid }?.name }
+      ?.let { " → $it" }
+      .orEmpty()
+    Toast.makeText(context, "Downloading $resLabel$sizeHint$folderHint…", Toast.LENGTH_SHORT).show()
+  }
+
+  fun enqueueDownload(option: StreamOption) {
+    if (downloadBusy) return
+    if (downloadFolders.isNotEmpty()) {
+      pendingDownloadOption = option
+      showDownloadFolderPicker = true
+    } else {
+      startDownload(option, folderId = null)
+    }
+  }
+
+  fun performBookmark(folderId: String?) {
+    val source = VideoSource.fromUrl(pageUrl)
+      ?: VideoSource.fromId(details?.related?.firstOrNull()?.sourceId)
+    // Prefer listing thumb (passed in), then resolved detail thumb. Never keep
+    // weak logos. Always sanitize for Buumal-style non-ASCII paths.
+    val bestThumb = NetworkClient.sanitizeMediaUrl(
+      listOf(thumbnailUrl, details?.thumbnailUrl.orEmpty())
+        .map { it.trim() }
+        .firstOrNull { it.isNotBlank() && !isWeakThumbnailUrl(it) && !ThumbnailResolver.isWeakCover(it) }
+        ?: thumbnailUrl.ifBlank { details?.thumbnailUrl.orEmpty() },
+    )
+    val added = app.bookmarkStore.toggle(
+      BookmarkedVideo(
+        id = "",
+        title = details?.title?.takeIf { it.isNotBlank() } ?: title,
+        pageUrl = pageUrl,
+        thumbnailUrl = bestThumb,
+        duration = details?.duration ?: duration,
+        resolution = details?.resolution ?: resolution,
+        sourceId = source.id,
+        sourceLabel = source.label,
+      ),
+      folderId = folderId,
+    )
+    val folderHint = if (added) {
+      folderId
+        ?.let { fid -> bookmarkFolders.firstOrNull { it.id == fid }?.name }
+        ?.let { " → $it" }
+        .orEmpty()
+    } else {
+      ""
+    }
+    Toast.makeText(
+      context,
+      if (added) "Saved to Bookmarks$folderHint" else "Removed from Bookmarks",
+      Toast.LENGTH_SHORT,
+    ).show()
   }
 
   fun onCapturedMedia(url: String) {
@@ -479,23 +722,34 @@ fun PlayerScreen(
           related = emptyList(),
           thumbnailUrl = thumbnailUrl,
         )
-        playStream(local)
+        playStream(local, resumePosition = initialPositionMs.coerceAtLeast(0L))
         loading = false
       } else {
         val result = withContext(Dispatchers.IO) {
           app.repository.fetchVideoDetails(pageUrl)
         }
-        // Avoid a second slow withSizes pass when sizes were already probed (or skipped).
-        val streams = result.streams.ifEmpty {
-          listOf(StreamOption(label = result.resolution.ifBlank { "Auto" }, url = result.streamUrl))
-        }
+        // Expand multi-bitrate masters into discrete 360/480/… options; prefer low start.
+        val streams = expandMultiQualityStreams(
+          result.streams.ifEmpty {
+            listOf(StreamOption(label = result.resolution.ifBlank { "Auto" }, url = result.streamUrl))
+          },
+        )
+        // Skip size probes for HLS / rate-limit-sensitive CDNs (HEAD storms → HTTP 429).
         val sized = if (streams.any { it.sizeBytes != null && it.sizeBytes!! > 0L }) {
           streams
         } else if (
           streams.any {
-            it.url.contains("drkogyi", true) ||
+            it.url.contains(".m3u8", true) ||
+              it.url.contains("turbovid", true) ||
+              it.url.contains("turboviplay", true) ||
+              it.url.contains("drkogyi", true) ||
               it.url.contains("/uploads/", true) ||
-              it.label.equals("Embed", true)
+              it.url.contains("xhcdn", true) ||
+              it.url.contains("ahacdn", true) ||
+              it.url.contains("txxx", true) ||
+              it.label.contains("HLS", true) ||
+              it.label.equals("Embed", true) ||
+              it.label.equals("Auto", true)
           }
         ) {
           streams
@@ -515,19 +769,20 @@ fun PlayerScreen(
         details = result.copy(
           streams = sized,
           views = viewsResolved,
+          streamUrl = pickDefaultStream(sized)?.url ?: result.streamUrl,
           resolution = pickDefaultStream(sized)?.label
             ?: result.resolution,
         )
         val available = availableQualityOptions(sized)
         val compatible = if (forceMp4) available.filter(::isDirectMp4Stream) else available
-        // Default play: 480p → 360p → lower (not 1080p first).
+        // Default play: 360p → 480p → lower (never open on 1080p when lower exists).
         val first = pickDefaultStream(compatible)
           ?: pickDefaultStream(available)
           ?: if (forceMp4) {
             sized.firstOrNull { isDirectMp4Url(it.url) }
               ?: throw IllegalStateException("No MP4-compatible stream is available for this video")
           } else {
-            sized.firstOrNull()
+            sized.minByOrNull { streamQualityRank(it.label).let { r -> if (r <= 1) 9999 else r } }
               ?: StreamOption(label = result.resolution.ifBlank { "Auto" }, url = result.streamUrl)
           }
         // For moov-at-end hosts, prewarm the index (parallel range fetch) before prepare
@@ -541,17 +796,37 @@ fun PlayerScreen(
               first.url.contains("drkogyi", true) && pageUrl.contains("mmporns", true) ->
                 "https://mmporns.com/"
               first.url.contains("drkogyi", true) -> "https://drkogyi.vip/"
+              first.url.contains("pinaydeepweb", true) ||
+                pageUrl.contains("lootedpinay", true) ->
+                "https://lootedpinay.com/"
+              pageUrl.contains("kaldagan", true) -> "https://kaldagan.com/"
+              first.url.contains("pwerta", true) ||
+                first.url.contains("rubyvid", true) ||
+                first.url.contains("streamruby", true) ||
+                first.url.contains("savefiles", true) ||
+                first.url.contains("bigwarp", true) ||
+                pageUrl.contains("pwerta", true) ->
+                "https://pwerta.com/"
               else -> NetworkClient.siteReferer(pageUrl)
             }
             FastStartDataSource.prewarm(first.url, ref)
           }
         }
-        playStream(first, resumePosition = 0L)
+        playStream(first, resumePosition = initialPositionMs.coerceAtLeast(0L))
         loading = false
       }
     } catch (t: Throwable) {
       error = t.message ?: "Failed to load video"
       loading = false
+    }
+  }
+
+  // Keep progress so related → back restores the previous video's position.
+  val progressSave by rememberUpdatedState(onProgressSave)
+  DisposableEffect(pageUrl, exoPlayer) {
+    onDispose {
+      val pos = exoPlayer.currentPosition
+      if (pos > 1_000L) progressSave(pos)
     }
   }
 
@@ -589,8 +864,16 @@ fun PlayerScreen(
 
       override fun onPlayerError(playbackException: androidx.media3.common.PlaybackException) {
         // Surface real playback failures instead of spinning forever on a black player.
-        val cause = playbackException.cause?.message ?: playbackException.message
-        error = cause ?: "Playback failed"
+        val causeEx = playbackException.cause
+        val cause = causeEx?.message ?: playbackException.message
+        val code = (causeEx as? HttpDataSource.InvalidResponseCodeException)?.responseCode
+        error = when {
+          code == 429 || cause?.contains("429") == true ->
+            "Rate limited (HTTP 429). Wait a few seconds and tap retry."
+          code == 503 || code == 502 ->
+            "Server busy (HTTP $code). Try again shortly."
+          else -> cause ?: "Playback failed"
+        }
         loading = false
       }
 
@@ -828,6 +1111,36 @@ fun PlayerScreen(
     }
   }
 
+  if (showDownloadFolderPicker) {
+    FolderPickerDialog(
+      title = "Save download to folder",
+      folders = downloadFolders,
+      rootLabel = "No folder (root)",
+      onDismiss = {
+        showDownloadFolderPicker = false
+        pendingDownloadOption = null
+      },
+      onPick = { folderId ->
+        val opt = pendingDownloadOption
+        showDownloadFolderPicker = false
+        pendingDownloadOption = null
+        if (opt != null) startDownload(opt, folderId)
+      },
+    )
+  }
+  if (showBookmarkFolderPicker) {
+    FolderPickerDialog(
+      title = "Save bookmark to folder",
+      folders = bookmarkFolders,
+      rootLabel = "No folder (root)",
+      onDismiss = { showBookmarkFolderPicker = false },
+      onPick = { folderId ->
+        showBookmarkFolderPicker = false
+        performBookmark(folderId)
+      },
+    )
+  }
+
   Column(
     modifier = modifier
       .fillMaxSize()
@@ -889,9 +1202,9 @@ fun PlayerScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(16.dp),
           ) {
-            Text("Playback error", color = Color.White, fontWeight = FontWeight.Bold)
+            Text("Video has been removed", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(modifier = Modifier.height(6.dp))
-            Text(error.orEmpty(), color = TextMetaBlue, fontSize = 12.sp)
+            Text("This video is unavailable or has been deleted.", color = TextMetaBlue, fontSize = 13.sp)
           }
         }
         useEmbed && !embedUrl.isNullOrBlank() -> {
@@ -1027,28 +1340,53 @@ fun PlayerScreen(
         }
       }
 
-      // Fullscreen only (no extra settings gear at top)
+      // Fullscreen & orientation controls
       if (!loading && error == null) {
-        Surface(
-          shape = CircleShape,
-          color = Color.Black.copy(alpha = 0.45f),
+        Row(
           modifier = Modifier
             .align(Alignment.TopEnd)
-            .padding(8.dp)
-            .size(40.dp)
-            .clickable { setFullscreen(!isFullscreen) },
+            .padding(8.dp),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalAlignment = Alignment.CenterVertically,
         ) {
-          Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-            Icon(
-              imageVector = if (isFullscreen) {
-                Icons.Default.FullscreenExit
-              } else {
-                Icons.Default.Fullscreen
-              },
-              contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
-              tint = Color.White,
-              modifier = Modifier.size(22.dp),
-            )
+          if (isFullscreen) {
+            Surface(
+              shape = CircleShape,
+              color = Color.Black.copy(alpha = 0.55f),
+              modifier = Modifier
+                .size(40.dp)
+                .clickable { toggleFullscreenOrientation() },
+            ) {
+              Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                Icon(
+                  imageVector = Icons.Default.ScreenRotation,
+                  contentDescription = if (isLandscapeFullscreen) "Switch to Portrait" else "Switch to Landscape",
+                  tint = if (isLandscapeFullscreen) CookiesmoAccent else Color.White,
+                  modifier = Modifier.size(20.dp),
+                )
+              }
+            }
+          }
+
+          Surface(
+            shape = CircleShape,
+            color = Color.Black.copy(alpha = 0.55f),
+            modifier = Modifier
+              .size(40.dp)
+              .clickable { setFullscreen(!isFullscreen) },
+          ) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+              Icon(
+                imageVector = if (isFullscreen) {
+                  Icons.Default.FullscreenExit
+                } else {
+                  Icons.Default.Fullscreen
+                },
+                contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
+                tint = Color.White,
+                modifier = Modifier.size(22.dp),
+              )
+            }
           }
         }
 
@@ -1223,25 +1561,13 @@ fun PlayerScreen(
                   color = CookiesmoSurface,
                   border = BorderStroke(1.dp, if (isBookmarked) CookiesmoAccent else CookiesmoMuted),
                   modifier = Modifier.clickable {
-                    val source = VideoSource.fromUrl(pageUrl)
-                      ?: VideoSource.fromId(details?.related?.firstOrNull()?.sourceId)
-                    val added = app.bookmarkStore.toggle(
-                      BookmarkedVideo(
-                        id = "",
-                        title = displayTitle,
-                        pageUrl = pageUrl,
-                        thumbnailUrl = details?.thumbnailUrl ?: thumbnailUrl,
-                        duration = displayDuration,
-                        resolution = displayResolution,
-                        sourceId = source.id,
-                        sourceLabel = source.label,
-                      ),
-                    )
-                    Toast.makeText(
-                      context,
-                      if (added) "Saved to Bookmarks" else "Removed from Bookmarks",
-                      Toast.LENGTH_SHORT,
-                    ).show()
+                    if (isBookmarked) {
+                      performBookmark(folderId = null)
+                    } else if (bookmarkFolders.isNotEmpty()) {
+                      showBookmarkFolderPicker = true
+                    } else {
+                      performBookmark(folderId = null)
+                    }
                   },
                 ) {
                   Row(
@@ -1388,8 +1714,11 @@ fun PlayerScreen(
               }
             }
 
+            Spacer(modifier = Modifier.height(16.dp))
+            NativeAdCard()
+
             if (related.isNotEmpty()) {
-              Spacer(modifier = Modifier.height(20.dp))
+              Spacer(modifier = Modifier.height(16.dp))
               Text(
                 text = "Related videos",
                 color = CookiesmoTextPrimary,
@@ -1400,13 +1729,56 @@ fun PlayerScreen(
           }
         }
 
-        items(related, key = { it.id }) { video ->
+        val maxVisible = minOf((1 + showMoreClicks) * 10, related.size)
+        val visibleRelated = related.take(maxVisible)
+
+        items(
+          visibleRelated,
+          key = { "${it.sourceId}_${it.id}_${it.pageUrl}" },
+        ) { video ->
           RelatedVideoCard(
             video = video,
             showThumbnail = !previewsDisabled,
             onClick = { onRelatedClick(video) },
             modifier = Modifier.padding(horizontal = 4.dp),
           )
+        }
+
+        if (showMoreClicks < 3 && related.size > visibleRelated.size) {
+          item(span = { GridItemSpan(maxLineSpan) }) {
+            Box(
+              modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 14.dp),
+              contentAlignment = Alignment.Center,
+            ) {
+              Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = CookiesmoSurface,
+                border = BorderStroke(1.dp, TagBlue),
+                modifier = Modifier.clickable { showMoreClicks++ },
+              ) {
+                Row(
+                  verticalAlignment = Alignment.CenterVertically,
+                  modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp),
+                ) {
+                  Icon(
+                    imageVector = Icons.Default.ExpandMore,
+                    contentDescription = null,
+                    tint = CookiesmoTextPrimary,
+                    modifier = Modifier.size(20.dp),
+                  )
+                  Spacer(modifier = Modifier.width(6.dp))
+                  Text(
+                    text = "Show More (+10)",
+                    color = CookiesmoTextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                  )
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -1670,7 +2042,9 @@ private fun RelatedVideoCard(
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
-  val context = LocalContext.current
+  // Application context avoids Coil/Glide-style crashes if the activity is
+  // destroyed while a thumb request is still starting (related grid scroll).
+  val context = LocalContext.current.applicationContext
   Column(
     modifier = modifier
       .fillMaxWidth()
@@ -1687,7 +2061,8 @@ private fun RelatedVideoCard(
         AsyncImage(
           model = ImageRequest.Builder(context)
             .data(video.thumbnailUrl)
-            .crossfade(true)
+            .size(360)
+            .crossfade(120)
             .build(),
           contentDescription = video.title,
           contentScale = ContentScale.Crop,

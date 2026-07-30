@@ -58,32 +58,57 @@ internal suspend fun enrichRelatedVideos(
     pageUrl: String,
     client: VideoSourceClient,
 ): VideoDetails {
-    val selfSlug = pageUrl.trimEnd('/').substringAfterLast('/').substringBefore('?')
-        .substringBefore('#')
-    fun isSelf(item: VideoItem): Boolean {
-        if (item.pageUrl.isNotBlank() && item.pageUrl.equals(pageUrl, ignoreCase = true)) {
-            return true
-        }
+    val selfSlug = pageUrl.trimEnd('/').substringAfterLast('/').substringBefore('?').substringBefore('#').lowercase()
+    val selfTitle = details.title.trim().lowercase()
+
+    fun normalizeUrl(u: String): String = u.trim().trimEnd('/')
+        .lowercase()
+        .removePrefix("https://")
+        .removePrefix("http://")
+        .removePrefix("www.")
+
+    val selfUrlNorm = normalizeUrl(pageUrl)
+
+    val seenKeys = mutableSetOf<String>()
+    if (selfUrlNorm.isNotBlank()) seenKeys.add("u:$selfUrlNorm")
+    if (selfTitle.length >= 4) seenKeys.add("t:$selfTitle")
+    if (selfSlug.length >= 4) seenKeys.add("i:$selfSlug")
+
+    fun isDuplicateOrSelf(item: VideoItem): Boolean {
+        val normTitle = item.title.trim().lowercase()
+        val normUrl = normalizeUrl(item.pageUrl)
+        val normId = item.id.trim().lowercase()
+
+        if (normUrl.isNotBlank() && normUrl == selfUrlNorm) return true
+        if (normTitle.isNotBlank() && selfTitle.isNotBlank() && normTitle == selfTitle) return true
         if (selfSlug.length >= 4) {
-            if (item.id.equals(selfSlug, ignoreCase = true)) return true
-            if (item.pageUrl.contains(selfSlug, ignoreCase = true)) return true
+            if (normId == selfSlug) return true
+            if (normUrl.contains(selfSlug)) return true
         }
+
+        val keyUrl = if (normUrl.isNotBlank()) "u:$normUrl" else ""
+        val keyId = if (normId.isNotBlank()) "i:$normId" else ""
+        val keyTitle = if (normTitle.length >= 5) "t:$normTitle" else ""
+
+        if (keyUrl.isNotBlank() && seenKeys.contains(keyUrl)) return true
+        if (keyId.isNotBlank() && seenKeys.contains(keyId)) return true
+        if (keyTitle.isNotBlank() && seenKeys.contains(keyTitle)) return true
+
+        if (keyUrl.isNotBlank()) seenKeys.add(keyUrl)
+        if (keyId.isNotBlank()) seenKeys.add(keyId)
+        if (keyTitle.isNotBlank()) seenKeys.add(keyTitle)
         return false
     }
 
-    val scraped = details.related
-        .filterNot(::isSelf)
-        .distinctBy { it.pageUrl.ifBlank { it.id } }
+    val scraped = details.related.filterNot(::isDuplicateOrSelf)
 
-    if (scraped.size >= 10) {
-        return details.copy(related = scraped.take(16))
+    if (scraped.size >= 40) {
+        return details.copy(related = scraped.take(40))
     }
 
-    val merged = linkedMapOf<String, VideoItem>()
+    val merged = mutableListOf<VideoItem>()
     for (item in scraped) {
-        merged[item.pageUrl.ifBlank { item.id }] = item.copy(
-            sourceId = item.sourceId.ifBlank { client.source.id },
-        )
+        merged.add(item.copy(sourceId = item.sourceId.ifBlank { client.source.id }))
     }
 
     val query = relatedQueryFromTitle(details.title, details.tags)
@@ -91,36 +116,35 @@ internal suspend fun enrichRelatedVideos(
         try {
             val found = client.search(query, page = 1)
             for (item in found) {
-                if (isSelf(item)) continue
-                val key = item.pageUrl.ifBlank { item.id }
-                if (key.isBlank() || merged.containsKey(key)) continue
-                merged[key] = item.copy(
-                    sourceId = item.sourceId.ifBlank { client.source.id },
-                    category = item.category.ifBlank { client.source.label },
+                if (isDuplicateOrSelf(item)) continue
+                merged.add(
+                    item.copy(
+                        sourceId = item.sourceId.ifBlank { client.source.id },
+                        category = item.category.ifBlank { client.source.label },
+                    ),
                 )
-                if (merged.size >= 16) break
+                if (merged.size >= 40) break
             }
         } catch (_: Exception) {
         }
     }
 
-    // Last resort: same-source home feed so the section is never empty when the site works.
-    if (merged.size < 6) {
+    if (merged.size < 10) {
         try {
             val home = client.fetchHomeVideos(1)
             for (item in home) {
-                if (isSelf(item)) continue
-                val key = item.pageUrl.ifBlank { item.id }
-                if (key.isBlank() || merged.containsKey(key)) continue
-                merged[key] = item.copy(
-                    sourceId = item.sourceId.ifBlank { client.source.id },
-                    category = item.category.ifBlank { client.source.label },
+                if (isDuplicateOrSelf(item)) continue
+                merged.add(
+                    item.copy(
+                        sourceId = item.sourceId.ifBlank { client.source.id },
+                        category = item.category.ifBlank { client.source.label },
+                    ),
                 )
-                if (merged.size >= 16) break
+                if (merged.size >= 40) break
             }
         } catch (_: Exception) {
         }
     }
 
-    return details.copy(related = merged.values.toList().take(16))
+    return details.copy(related = merged.take(40))
 }

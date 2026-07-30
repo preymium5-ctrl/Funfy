@@ -5,7 +5,7 @@ import kotlinx.coroutines.withContext
 import java.util.regex.Pattern
 
 // ---------------------------------------------------------------------------
-// QuatVn — post slug-{id} → quatvn.stream/stream/{id}.mp4
+// QuatVn — WP REST API listing + quatvn.stream/{id}.mp4 (HTML fallback)
 // ---------------------------------------------------------------------------
 
 class QuatVnClient : VideoSourceClient {
@@ -13,6 +13,9 @@ class QuatVnClient : VideoSourceClient {
 
     override suspend fun fetchHomeVideos(page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
         val p = page.coerceAtLeast(1)
+        // WP REST is authoritative: stable titles, featured thumbs, no cross-page dups.
+        val api = fetchWpPosts(page = p, search = null)
+        if (api.isNotEmpty()) return@withContext api
         val url = if (p <= 1) source.baseUrl + "/" else "${source.baseUrl}/page/$p/"
         parseListing(NetworkClient.get(url, source.baseUrl))
     }
@@ -20,38 +23,38 @@ class QuatVnClient : VideoSourceClient {
     override suspend fun search(query: String): List<VideoItem> = search(query, 1)
 
     override suspend fun search(query: String, page: Int): List<VideoItem> = withContext(Dispatchers.IO) {
-        val q = java.net.URLEncoder.encode(query.trim(), Charsets.UTF_8.name())
+        val q = query.trim()
+        if (q.isEmpty()) return@withContext emptyList()
         val p = page.coerceAtLeast(1)
-        val urls = if (p <= 1) {
-            listOf("${source.baseUrl}/?s=$q", "${source.baseUrl}/search/$q/")
-        } else {
-            listOf("${source.baseUrl}/page/$p/?s=$q", "${source.baseUrl}/?s=$q&paged=$p")
-        }
-        val seen = linkedSetOf<String>()
-        val out = mutableListOf<VideoItem>()
-        for (url in urls) {
-            try {
-                for (item in parseListing(NetworkClient.get(url, source.baseUrl))) {
-                    if (seen.add(item.id)) out.add(item)
-                }
-                if (out.isNotEmpty()) break
-            } catch (_: Exception) {
-            }
-        }
-        out
+        val api = fetchWpPosts(page = p, search = q)
+        if (api.isNotEmpty()) return@withContext api
+        val enc = java.net.URLEncoder.encode(q, Charsets.UTF_8.name())
+        val url = if (p <= 1) "${source.baseUrl}/?s=$enc" else "${source.baseUrl}/page/$p/?s=$enc"
+        parseListing(NetworkClient.get(url, source.baseUrl))
     }
 
     override suspend fun fetchVideoDetails(pageUrl: String): VideoDetails = withContext(Dispatchers.IO) {
+        if (pageUrl.contains("/top-10", true)) {
+            throw IllegalStateException("Not a video page")
+        }
+        // Collections without a numeric stream id are not a single playable video.
+        if (pageUrl.contains("collection", true) &&
+            Regex("""-(\d{3,})/?$""").find(pageUrl.trimEnd('/')) == null
+        ) {
+            throw IllegalStateException("Not a single video page")
+        }
         val html = NetworkClient.get(pageUrl, source.baseUrl)
         val title = NetworkClient.decodeHtml(
             NetworkClient.matchFirst(html, """property="og:title"\s+content="([^"]+)"""")
+                ?: NetworkClient.matchFirst(html, """class="[^"]*entry-title[^"]*"[^>]*>([^<]+)""")
                 ?: NetworkClient.matchFirst(html, """<title>([^<]+)</title>""")
                 ?: "Video",
-        ).substringBefore("•").substringBefore("|").trim()
+        ).substringBefore("•").substringBefore("&bull;").substringBefore("|")
+            .substringBefore("【Tên miền").trim()
         val thumb = NetworkClient.matchFirst(html, """property="og:image"\s+content="([^"]+)"""")
             .orEmpty()
-        val id = Regex("""-(\d+)/?$""").find(pageUrl.trimEnd('/'))?.groupValues?.get(1)
-            ?: NetworkClient.matchFirst(html, """quatvn\.stream/stream/(\d+)\.""")
+        val id = Regex("""-(\d{3,})/?$""").find(pageUrl.trimEnd('/'))?.groupValues?.get(1)
+            ?: NetworkClient.matchFirst(html, """quatvn\.stream/stream/(\d+)""")
         var streams = collectMp4AndHls(html, source.baseUrl)
         if (!id.isNullOrBlank()) {
             val mp4 = "https://quatvn.stream/stream/$id.mp4"
@@ -61,7 +64,7 @@ class QuatVnClient : VideoSourceClient {
         VideoDetails(
             streamUrl = streams.first().url,
             streams = streams.distinctBy { it.url },
-            title = title,
+            title = title.ifBlank { id ?: "Video" },
             uploader = "QuatVn",
             views = "—",
             ratingPercent = "—",
@@ -75,50 +78,138 @@ class QuatVnClient : VideoSourceClient {
         )
     }
 
+    private fun fetchWpPosts(page: Int, search: String?): List<VideoItem> {
+        return try {
+            val p = page.coerceAtLeast(1)
+            val q = if (!search.isNullOrBlank()) {
+                "&search=" + java.net.URLEncoder.encode(search, Charsets.UTF_8.name())
+            } else {
+                ""
+            }
+            // _embed pulls featured media; per_page=20 matches site density.
+            val url =
+                "${source.baseUrl}/wp-json/wp/v2/posts?per_page=20&page=$p&_embed=1&status=publish$q"
+            val json = NetworkClient.get(url, source.baseUrl)
+            parseWpJson(json)
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun parseWpJson(json: String): List<VideoItem> {
+        val items = mutableListOf<VideoItem>()
+        var index = 0
+        val seen = mutableSetOf<String>()
+        // Match each post by link + nearby title.rendered
+        val postRe = Regex(
+            """"link"\s*:\s*"(https:\\?/\\?/quatvn\.asia\\?/[^"]+)"[\s\S]{0,1200}?"title"\s*:\s*\{\s*"rendered"\s*:\s*"((?:\\.|[^"\\])*)"""",
+        )
+        // link may appear after title in some responses — also try reverse order
+        val postRe2 = Regex(
+            """"title"\s*:\s*\{\s*"rendered"\s*:\s*"((?:\\.|[^"\\])*)"[\s\S]{0,1200}?"link"\s*:\s*"(https:\\?/\\?/quatvn\.asia\\?/[^"]+)"""",
+        )
+        val pairs = mutableListOf<Pair<String, String>>() // link to titleRaw
+        for (m in postRe.findAll(json)) {
+            pairs.add(m.groupValues[1].replace("\\/", "/") to m.groupValues[2])
+        }
+        if (pairs.isEmpty()) {
+            for (m in postRe2.findAll(json)) {
+                pairs.add(m.groupValues[2].replace("\\/", "/") to m.groupValues[1])
+            }
+        }
+        for ((link, titleRaw) in pairs) {
+            if (link.contains("/top-10", true)) continue
+            val streamId = Regex("""-(\d{3,})/?$""").find(link.trimEnd('/'))?.groupValues?.get(1)
+                ?: continue // need numeric stream id for mp4/webp
+            if (!seen.add(streamId)) continue
+            val title = NetworkClient.decodeHtml(unescapeJson(titleRaw)).trim()
+            if (title.isBlank()) continue
+            // CDN thumbs are stable: https://quatvn.stream/stream/{id}.webp
+            val thumb = "https://quatvn.stream/stream/$streamId.webp"
+            items.add(
+                VideoItem(
+                    id = streamId,
+                    title = title,
+                    duration = "—",
+                    resolution = "HD",
+                    views = "—",
+                    category = "QuatVn",
+                    gradientSeed = index++,
+                    pageUrl = link,
+                    thumbnailUrl = thumb,
+                    sourceId = source.id,
+                ),
+            )
+            if (items.size >= 40) break
+        }
+        return items
+    }
+
+    private fun unescapeJson(s: String): String {
+        return buildString(s.length) {
+            var i = 0
+            while (i < s.length) {
+                val c = s[i]
+                if (c == '\\' && i + 1 < s.length) {
+                    when (val n = s[i + 1]) {
+                        'n' -> append('\n')
+                        'r' -> append('\r')
+                        't' -> append('\t')
+                        '"' -> append('"')
+                        '\\' -> append('\\')
+                        '/' -> append('/')
+                        'u' -> if (i + 5 < s.length) {
+                            val hex = s.substring(i + 2, i + 6)
+                            append(hex.toIntOrNull(16)?.toChar() ?: '?')
+                            i += 6
+                            continue
+                        } else append('u')
+                        else -> append(n)
+                    }
+                    i += 2
+                } else {
+                    append(c)
+                    i++
+                }
+            }
+        }
+    }
+
     private fun parseListing(html: String): List<VideoItem> {
         val items = mutableListOf<VideoItem>()
         val seen = mutableSetOf<String>()
         var index = 0
-        val skipSlug = setOf(
-            "top", "page", "category", "tag", "author", "danh-muc", "phim-sex-vn",
-            "phim-sex-trung-quoc", "phim-sex-han-quoc", "phim-sex-us", "feed",
-        )
-        val m = Pattern.compile(
-            """href="(https://quatvn\.asia/([a-z0-9-]+)-(\d+)/)"""",
+        // Map data-src thumbs by stream id when present on the page
+        val thumbById = HashMap<String, String>()
+        val thumbRe = Pattern.compile(
+            """data-src="(https?://quatvn\.stream/stream/([^"]+?)\.webp)"""",
             Pattern.CASE_INSENSITIVE,
         ).matcher(html)
-        while (m.find()) {
-            val href = m.group(1) ?: continue
-            val slug = m.group(2) ?: continue
-            val id = m.group(3) ?: continue
-            if (slug in skipSlug) continue
-            // top-10 style pages
-            if (id.length <= 2 && slug == "top") continue
-            if (!seen.add(id)) continue
-            val window = html.substring(
-                (m.start() - 120).coerceAtLeast(0),
-                (m.start() + 800).coerceAtMost(html.length),
-            )
-            val title = NetworkClient.decodeHtml(
-                NetworkClient.matchFirst(window, """(?:title|alt)="([^"]{2,})"""")
-                    ?: NetworkClient.matchFirst(
-                        html.substring(m.start(), (m.start() + 200).coerceAtMost(html.length)),
-                        """>([^<]{3,80})</a>""",
-                    )
-                    ?: "$slug $id",
-            )
-            val thumb = NetworkClient.matchFirst(
-                window,
-                """(?:data-src|data-original|src)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"""",
-            ).orEmpty().ifBlank { "https://quatvn.stream/stream/$id.webp" }
+        while (thumbRe.find()) {
+            val url = thumbRe.group(1) ?: continue
+            val key = thumbRe.group(2)?.replace(Regex("""\s*\(\d+\)"""), "")?.trim().orEmpty()
+            if (key.isNotBlank()) thumbById.putIfAbsent(key, url)
+        }
+        val titleLink = Pattern.compile(
+            """<h2[^>]*entry-title[^>]*>\s*<a[^>]+href="(https://quatvn\.asia/([a-z0-9-]+)-(\d{3,})/)"[^>]*>([^<]+)</a>""",
+            Pattern.CASE_INSENSITIVE,
+        ).matcher(html)
+        while (titleLink.find()) {
+            val href = titleLink.group(1) ?: continue
+            val slug = titleLink.group(2) ?: continue
+            val id = titleLink.group(3) ?: continue
+            if (slug == "top" || !seen.add(id)) continue
+            val title = NetworkClient.decodeHtml(titleLink.group(4).orEmpty()).trim()
+                .ifBlank { "$slug $id" }
+            val thumb = thumbById[id]
+                ?: "https://quatvn.stream/stream/$id.webp"
             items.add(
                 VideoItem(
                     id = id,
                     title = title,
                     duration = "—",
                     resolution = "HD",
-                    views = NetworkClient.matchFirst(window, """>([\d.]+[kKmM]?)</strong>\s*<span>\s*Views""")
-                        ?: "—",
+                    views = "—",
                     category = "QuatVn",
                     gradientSeed = index++,
                     pageUrl = href,
@@ -126,7 +217,7 @@ class QuatVnClient : VideoSourceClient {
                     sourceId = source.id,
                 ),
             )
-            if (items.size >= 80) break
+            if (items.size >= 40) break
         }
         return items
     }
@@ -469,20 +560,18 @@ class HanimeClient : VideoSourceClient {
 
     private fun searchInternal(query: String, page: Int): List<VideoItem> {
         val q = java.net.URLEncoder.encode(query, Charsets.UTF_8.name())
-        val url = "$searchApi?query=$q&page=${(page - 1).coerceAtLeast(0)}"
+        // freeanime API ignores page and returns a large dump — always fetch once and slice.
+        val url = "$searchApi?query=$q&page=0"
         val body = NetworkClient.get(
             url,
             source.baseUrl,
             extraHeaders = mapOf("Accept" to "application/json"),
         )
-        // API may return a large dump; page client-side for stable grids.
         val all = parseSearchJson(body)
         val pageSize = 40
         val from = ((page - 1).coerceAtLeast(0)) * pageSize
-        return all.drop(from).take(pageSize).ifEmpty {
-            // If server already paged, use the raw list.
-            if (page <= 1) all.take(pageSize) else emptyList()
-        }
+        if (from >= all.size) return emptyList()
+        return all.drop(from).take(pageSize)
     }
 
     private fun parseSearchJson(body: String): List<VideoItem> {
@@ -527,7 +616,7 @@ class HanimeClient : VideoSourceClient {
                         sourceId = source.id,
                     ),
                 )
-                if (items.size >= 80) break
+                // No hard cap — API returns thousands of titles; client-side paging handles size.
             }
         } catch (_: Exception) {
             // Fallback regex if payload is not pure JSON.
@@ -572,7 +661,6 @@ class HanimeClient : VideoSourceClient {
                         sourceId = source.id,
                     ),
                 )
-                if (items.size >= 80) break
             }
         }
         return items

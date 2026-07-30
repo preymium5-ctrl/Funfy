@@ -16,6 +16,10 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Serves a virtual fast-start layout for moov-at-end MP4s prepared by [Mp4FastStart].
  * Falls back to [DefaultHttpDataSource] when the file is already fast-start.
+ *
+ * Remote mdat reads use a **1MB readahead cache** so ExoPlayer's small sequential
+ * reads don't open a new HTTP Range request every few KB (that pattern causes
+ * constant buffering on hosts like pinaydeepweb / lootedpinay Clean Tube).
  */
 @OptIn(UnstableApi::class)
 class FastStartDataSource(
@@ -31,6 +35,11 @@ class FastStartDataSource(
     private var opened = false
     private var transferStarted = false
 
+    // Sequential readahead for UpstreamMap.Remote
+    private var remoteBuf: ByteArray? = null
+    private var remoteBufStart: Long = -1L
+    private var remoteBufEnd: Long = -1L // exclusive
+
     override fun open(dataSpec: DataSpec): Long {
         this.dataSpec = dataSpec
         transferInitializing(dataSpec)
@@ -38,6 +47,11 @@ class FastStartDataSource(
         val referer = dataSpec.httpRequestHeaders["Referer"]
             ?: defaultReferer
             ?: NetworkClient.siteReferer(url)
+
+        // Reset readahead on every open (seek / new media).
+        remoteBuf = null
+        remoteBufStart = -1L
+        remoteBufEnd = -1L
 
         plan = plans[url]
         if (plan == null && shouldTryFastStart(url)) {
@@ -53,14 +67,15 @@ class FastStartDataSource(
             val fb = DefaultHttpDataSource.Factory()
                 .setUserAgent(userAgent)
                 .setAllowCrossProtocolRedirects(true)
-                .setConnectTimeoutMs(12_000)
-                .setReadTimeoutMs(20_000)
+                .setConnectTimeoutMs(15_000)
+                .setReadTimeoutMs(30_000)
                 .setDefaultRequestProperties(
                     buildMap {
                         put("Accept", "*/*")
+                        put("Accept-Encoding", "identity")
                         if (!referer.isNullOrBlank()) {
                             put("Referer", referer)
-                            put("Origin", referer.trimEnd('/'))
+                            // Don't send Origin — some WP hosts throttle/CORS-stall on it.
                         }
                     },
                 )
@@ -124,6 +139,7 @@ class FastStartDataSource(
                     offset = offset,
                     length = length,
                     referer = p.referer,
+                    originalLength = p.originalLength,
                 )
             }
         }
@@ -136,31 +152,65 @@ class FastStartDataSource(
         offset: Int,
         length: Int,
         referer: String?,
+        originalLength: Long,
     ): Int {
-        // Larger chunks = fewer round-trips on slow hosts.
-        val chunk = minOf(length, 256 * 1024)
-        val end = position + chunk - 1
+        // Serve from readahead when possible (sequential playback path).
+        val cached = remoteBuf
+        if (
+            cached != null &&
+            position >= remoteBufStart &&
+            position < remoteBufEnd
+        ) {
+            val off = (position - remoteBufStart).toInt()
+            val can = minOf(length, (remoteBufEnd - position).toInt())
+            if (can > 0) {
+                System.arraycopy(cached, off, buffer, offset, can)
+                return can
+            }
+        }
+
+        // Prefetch a large contiguous range — Exo often asks for 8–32 KB at a time.
+        val prefetch = PREFETCH_BYTES.toLong()
+        val end = minOf(originalLength - 1, position + prefetch - 1)
+        if (end < position) return C.RESULT_END_OF_INPUT
+
         val req = Request.Builder()
             .url(url)
             .header("User-Agent", userAgent)
             .header("Accept", "*/*")
+            .header("Accept-Encoding", "identity")
             .header("Range", "bytes=$position-$end")
             .apply { if (!referer.isNullOrBlank()) header("Referer", referer) }
             .get()
             .build()
         return try {
             NetworkClient.http.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful && resp.code != 206) {
-                    throw IOException("HTTP ${resp.code} reading $url@$position")
-                }
                 val bytes = resp.body?.bytes() ?: return C.RESULT_END_OF_INPUT
-                val n = minOf(chunk, bytes.size)
-                System.arraycopy(bytes, 0, buffer, offset, n)
+                if (bytes.isEmpty()) return C.RESULT_END_OF_INPUT
+                val actualStart = if (resp.code == 206) {
+                    val cr = resp.header("Content-Range")
+                    val parsed = cr?.substringAfter("bytes ")?.substringBefore('-')?.toLongOrNull()
+                    parsed ?: position
+                } else {
+                    0L
+                }
+                remoteBuf = bytes
+                remoteBufStart = actualStart
+                remoteBufEnd = actualStart + bytes.size
+                if (position < remoteBufStart || position >= remoteBufEnd) {
+                    return C.RESULT_END_OF_INPUT
+                }
+                val off = (position - remoteBufStart).toInt()
+                val n = minOf(length, bytes.size - off)
+                if (n <= 0) return C.RESULT_END_OF_INPUT
+                System.arraycopy(bytes, off, buffer, offset, n)
                 n
             }
         } catch (e: IOException) {
+            remoteBuf = null
             throw e
         } catch (e: Exception) {
+            remoteBuf = null
             throw IOException("Read failed at $position", e)
         }
     }
@@ -179,11 +229,17 @@ class FastStartDataSource(
         transferStarted = false
         plan = null
         dataSpec = null
+        remoteBuf = null
+        remoteBufStart = -1L
+        remoteBufEnd = -1L
     }
 
     companion object {
         /** Process-wide plan cache so revisiting a video is instant. */
         private val plans = ConcurrentHashMap<String, Mp4FastStart.Plan>()
+
+        /** 1.5 MB readahead — fewer HTTP round-trips on progressive CDNs. */
+        private const val PREFETCH_BYTES = 1_572_864
 
         fun prewarm(url: String, referer: String?): Mp4FastStart.Plan? {
             plans[url]?.let { return it }
@@ -195,8 +251,8 @@ class FastStartDataSource(
 
         fun shouldTryFastStart(url: String): Boolean {
             val u = url.lowercase()
-            // Progressive MP4s with moov-at-end (MMHDHub / Clean Tube / R2) need virtual
-            // fast-start so seeks don't re-buffer forever.
+            // Progressive MP4s with moov-at-end (MMHDHub / Clean Tube / R2 / PH WP hosts)
+            // need virtual fast-start so the player doesn't range-GET EOF first.
             return u.contains(".mp4") && (
                 u.contains("drkogyi") ||
                     u.contains("/uploads/") ||
@@ -207,7 +263,19 @@ class FastStartDataSource(
                     u.contains("dl.mmhdhub") ||
                     u.contains("wp-content") ||
                     u.contains("gdvid.info") ||
-                    u.contains("javprovider.com")
+                    u.contains("javprovider.com") ||
+                    u.contains("pinaydeepweb") ||
+                    u.contains("lootedpinay") ||
+                    u.contains("kaldagan") ||
+                    u.contains("pinayum") ||
+                    u.contains("pwerta") ||
+                    u.contains("rubyvid") ||
+                    u.contains("streamruby") ||
+                    u.contains("savefiles") ||
+                    u.contains("bigwarp") ||
+                    u.contains("video.beeg") ||
+                    u.contains("ahcdn.com") ||
+                    u.contains("xxxfiles")
                 )
         }
 

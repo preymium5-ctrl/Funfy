@@ -21,10 +21,13 @@ class MainScreenTest {
       MaterialTheme {
         SearchScreenContent(
           remoteResults = null,
+          searchQuery = "",
+          onSearchQueryChange = {},
           searchLoading = false,
           searchError = null,
           currentSource = VideoSource.XVIDEOS,
           resultSource = null,
+          searchHistory = emptyList(),
           onSearch = {},
           onClearSearch = {},
           onSourceSelected = {},

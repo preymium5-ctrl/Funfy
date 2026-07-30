@@ -92,6 +92,7 @@ object AppSettings {
   private const val KEY_DISABLE_PREVIEWS = "disable_previews"
   private const val KEY_FORCE_MP4 = "force_mp4"
   private const val KEY_AUTO_PLAY = "autoplay"
+  private const val KEY_AUTO_SHUFFLE = "auto_shuffle"
   private const val KEY_LAUNCHER_IDENTITY = "launcher_identity"
   private const val HASH_ROUNDS = 20_000
 
@@ -172,6 +173,14 @@ object AppSettings {
     preferences(context).edit().putBoolean(KEY_AUTO_PLAY, enabled).apply()
   }
 
+  /** When on, each home page is shuffled so the grid order feels random. */
+  fun autoShuffle(context: Context): Boolean =
+    preferences(context).getBoolean(KEY_AUTO_SHUFFLE, false)
+
+  fun setAutoShuffle(context: Context, enabled: Boolean) {
+    preferences(context).edit().putBoolean(KEY_AUTO_SHUFFLE, enabled).apply()
+  }
+
   fun launcherIdentity(context: Context): LauncherIdentity =
     LauncherIdentity.fromPreference(
       preferences(context).getString(KEY_LAUNCHER_IDENTITY, null),
@@ -246,6 +255,14 @@ class MainActivity : ComponentActivity() {
 
     // Keep private playback/search frames out of screenshots and Recents snapshots.
     window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+      window.attributes = window.attributes.apply {
+        layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+      }
+    }
+    window.statusBarColor = Color.BLACK
+    window.navigationBarColor = Color.BLACK
+    window.decorView.setBackgroundColor(Color.BLACK)
 
     val identity = AppSettings.launcherIdentity(this)
     LauncherIdentityManager.reconcile(this)

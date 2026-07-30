@@ -65,11 +65,18 @@ enum class VideoSource(
         hostHints = listOf("redtube.com", "rdtcdn.com"),
         provider = SourceProvider.LEGACY,
     ),
-    HQPORNER(
-        id = "hqporner",
-        label = "HQPorner",
-        baseUrl = "https://hqporner.com",
-        hostHints = listOf("hqporner.com", "mydaddy.cc", "bigcdn.cc"),
+    TUBE8(
+        id = "tube8",
+        label = "Tube8",
+        baseUrl = "https://www.tube8.com",
+        hostHints = listOf("tube8.com", "t8cdn.com"),
+        provider = SourceProvider.LEGACY,
+    ),
+    TIAVA(
+        id = "tiava",
+        label = "Tiava",
+        baseUrl = "https://www.tiava.com",
+        hostHints = listOf("tiava.com"),
         provider = SourceProvider.LEGACY,
     ),
     TNAFLIX(
@@ -100,20 +107,69 @@ enum class VideoSource(
         hostHints = listOf("analdin.com"),
         provider = SourceProvider.LEGACY,
     ),
-    XXXTIME(
-        id = "xxxtime",
-        label = "XxxTime",
-        baseUrl = "https://xxxtime.video",
-        hostHints = listOf("xxxtime.video", "siska.tv", "siska.video"),
+    XHAMSTER2(
+        id = "xhamster2",
+        label = "xHamster2",
+        baseUrl = "https://xhamster2.com",
+        hostHints = listOf("xhamster2.com", "xhcdn.com"),
+        provider = SourceProvider.LEGACY,
+    ),
+    BEEG(
+        id = "beeg",
+        label = "Beeg",
+        baseUrl = "https://beeg.com",
+        hostHints = listOf(
+            "beeg.com",
+            "externulls.com",
+            "ahacdn.me",
+            "thumbs.externulls.com",
+        ),
+        provider = SourceProvider.LEGACY,
+    ),
+    TXXX(
+        id = "txxx",
+        label = "TXXX",
+        baseUrl = "https://txxx.com",
+        hostHints = listOf("txxx.com", "txxx.tube", "tn.txxx.tube", "vp1.txxx.com"),
+        provider = SourceProvider.LEGACY,
+    ),
+    XXXFILES(
+        id = "xxxfiles",
+        label = "XXXFiles",
+        baseUrl = "https://www.xxxfiles.com",
+        hostHints = listOf("xxxfiles.com", "porngo.com"),
         provider = SourceProvider.LEGACY,
     ),
 
-    // ── Japan / JAV — 5 real sites ────────────────────────────────────────
-    MISSAV(
-        id = "missav",
-        label = "MissAV",
-        baseUrl = "https://missav.ws",
-        hostHints = listOf("missav.ws", "missav.com", "missav.ai", "surrit.com", "fourhoi.com"),
+    // ── Japan / JAV ───────────────────────────────────────────────────────
+    JABLE(
+        id = "jable",
+        label = "Jable.tv",
+        baseUrl = "https://jable.tv",
+        hostHints = listOf(
+            "jable.tv",
+            "jable.com",
+            "assets-cdn.jable",
+            "cdn-cf-east.jable",
+        ),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.JAV,
+    ),
+    /**
+     * Free JAV streamer (replaces CF-blocked supjav.com — same role in the catalog).
+     * Live site: javmost.ws
+     */
+    SUPJAV(
+        id = "javmost",
+        label = "JavMost",
+        baseUrl = "https://www.javmost.ws",
+        hostHints = listOf(
+            "javmost.ws",
+            "javmost.com",
+            "img2.javmost.ws",
+            "img3.javmost.ws",
+            "supjav.com",
+        ),
         provider = SourceProvider.LEGACY,
         region = SourceRegion.JAV,
     ),
@@ -152,6 +208,22 @@ enum class VideoSource(
         label = "JavSeen",
         baseUrl = "https://javseenz.tv",
         hostHints = listOf("javseenz.tv", "javseen.tv", "pics.javseenz.tv"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.JAV,
+    ),
+    XASIAT(
+        id = "xasiat",
+        label = "Xasiat",
+        baseUrl = "https://www.xasiat.com",
+        hostHints = listOf("xasiat.com", "xascdn.li", "pic.xascdn.li"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.JAV,
+    ),
+    JAVTUB(
+        id = "javtub",
+        label = "JavTub",
+        baseUrl = "https://javtub.pro",
+        hostHints = listOf("javtub.pro", "javtub.com"),
         provider = SourceProvider.LEGACY,
         region = SourceRegion.JAV,
     ),
@@ -206,6 +278,102 @@ enum class VideoSource(
         region = SourceRegion.PHILIPPINES,
         isSelectable = false,
     ),
+    KALDAGAN(
+        id = "kaldagan",
+        label = "Kaldagan",
+        baseUrl = "https://kaldagan.com",
+        hostHints = listOf("kaldagan.com", "pinaydeepweb.xyz"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    PINAYUM(
+        id = "pinayum",
+        label = "Pinayum",
+        baseUrl = "https://pinayum.cc",
+        hostHints = listOf("pinayum.cc", "xtremestream.xyz"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    LOOTEDPINAY(
+        id = "lootedpinay",
+        label = "LootedPinay",
+        baseUrl = "https://lootedpinay.com",
+        hostHints = listOf("lootedpinay.com", "pinaydeepweb.xyz"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    PWERTA(
+        id = "pwerta",
+        label = "Pwerta",
+        baseUrl = "https://pwerta.com",
+        hostHints = listOf("pwerta.com", "rubyvidhub.com", "streamruby.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    IYOTTUBE(
+        id = "iyottube",
+        label = "IyotTube",
+        baseUrl = "https://iyottube.ph",
+        hostHints = listOf("iyottube.ph"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    SPOTIBOLD(
+        id = "spotibold",
+        label = "SpotiBold",
+        baseUrl = "https://spotibold.com",
+        hostHints = listOf("spotibold.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    XTORJACK(
+        id = "xtorjack",
+        label = "XtorJack",
+        baseUrl = "https://xtorjack.com",
+        hostHints = listOf("xtorjack.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    KANTOTPLUS(
+        id = "kantotplus",
+        label = "KantotPlus",
+        baseUrl = "https://kantotplus.com",
+        hostHints = listOf("kantotplus.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    PINAYVLOG(
+        id = "pinayvlog",
+        label = "PinayVlog",
+        baseUrl = "https://pinayvlog.com",
+        hostHints = listOf("pinayvlog.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    KATORSEX(
+        id = "katorsex",
+        label = "KatorSex",
+        baseUrl = "https://katorsex.me",
+        hostHints = listOf("katorsex.me"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    JAKOLMAN(
+        id = "jakolman",
+        label = "JakolMan",
+        baseUrl = "https://jakolman.com",
+        hostHints = listOf("jakolman.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
+    DINOTUBE(
+        id = "dinotube",
+        label = "DinoTube",
+        baseUrl = "https://dinotube.com",
+        hostHints = listOf("dinotube.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.PHILIPPINES,
+    ),
 
     // ── Indonesia — real sites only ───────────────────────────────────────
     INDO18(
@@ -248,6 +416,46 @@ enum class VideoSource(
         provider = SourceProvider.LEGACY,
         region = SourceRegion.INDONESIA,
     ),
+    PROBOKEP(
+        id = "probokep",
+        label = "ProBokep",
+        baseUrl = "https://probokep.app",
+        hostHints = listOf("probokep.app", "probokep.org"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.INDONESIA,
+    ),
+    GAIRAHTV(
+        id = "gairahtv",
+        label = "GairahTV",
+        baseUrl = "https://gairahtv.com",
+        hostHints = listOf("gairahtv.com", "gairah.tv"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.INDONESIA,
+    ),
+    BOKEPBOZ(
+        id = "bokepboz",
+        label = "BokepBoz",
+        baseUrl = "https://bokepboz.org",
+        hostHints = listOf("bokepboz.org", "bokepboz.net"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.INDONESIA,
+    ),
+    KINGBOKEP(
+        id = "kingbokep",
+        label = "KingBokep",
+        baseUrl = "https://kingbokep.uno",
+        hostHints = listOf("kingbokep.uno", "kingbokep.org"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.INDONESIA,
+    ),
+    HEIBOKEP(
+        id = "heibokep",
+        label = "HeiBokep",
+        baseUrl = "https://heibokep.org",
+        hostHints = listOf("heibokep.org", "heibokep.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.INDONESIA,
+    ),
 
     // ── Myanmar — real sites only (mmporns / drkogyi removed) ─────────────
     BUUMAL(
@@ -271,6 +479,54 @@ enum class VideoSource(
         label = "BabeXTube",
         baseUrl = "https://babextube.com",
         hostHints = listOf("babextube.com", "sub.babextube.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.MYANMAR,
+    ),
+    XBURMA(
+        id = "xburma",
+        label = "XBurma",
+        baseUrl = "https://xburma.cc",
+        hostHints = listOf("xburma.cc", "xburma.com", "xburma.org"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.MYANMAR,
+    ),
+    KOSARGYI(
+        id = "kosargyi",
+        label = "KoSarGyi",
+        baseUrl = "https://kosargyi.com",
+        hostHints = listOf("kosargyi.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.MYANMAR,
+    ),
+    XGROOVY(
+        id = "xgroovy",
+        label = "XGroovy",
+        baseUrl = "https://xgroovy.com",
+        hostHints = listOf("xgroovy.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.MYANMAR,
+    ),
+    MRNOEGYI(
+        id = "mrnoegyi",
+        label = "MrNoeGyi",
+        baseUrl = "https://mrnoegyi.com",
+        hostHints = listOf("mrnoegyi.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.MYANMAR,
+    ),
+    MAYNOE(
+        id = "maynoe",
+        label = "MayNoe",
+        baseUrl = "https://maynoe.com",
+        hostHints = listOf("maynoe.com"),
+        provider = SourceProvider.LEGACY,
+        region = SourceRegion.MYANMAR,
+    ),
+    APYARGABAR(
+        id = "apyargabar",
+        label = "ApyarGabar",
+        baseUrl = "https://apyargabar.com",
+        hostHints = listOf("apyargabar.com"),
         provider = SourceProvider.LEGACY,
         region = SourceRegion.MYANMAR,
     ),
@@ -308,6 +564,7 @@ enum class VideoSource(
         provider = SourceProvider.LEGACY,
         region = SourceRegion.VIETNAM,
     ),
+    /** Removed from picker — flaky titles/thumbs and limited catalog. */
     QUATVN(
         id = "quatvn",
         label = "QuatVn",
@@ -315,6 +572,7 @@ enum class VideoSource(
         hostHints = listOf("quatvn.asia", "quatvn.stream", "stream.quatvn.asia"),
         provider = SourceProvider.LEGACY,
         region = SourceRegion.VIETNAM,
+        isSelectable = false,
     ),
     /** Removed from picker — slow / flaky CDN; kept for migration of old prefs only. */
     SHENNANA(
@@ -431,20 +689,24 @@ enum class VideoSource(
 
         fun fromId(id: String?): VideoSource {
             val migrated = when (id?.lowercase()) {
-                "xnxx", "xhamster", "xhamster2" -> DEFAULT
+                "xnxx", "xhamster" -> DEFAULT
+                "xhamster2.com" -> XHAMSTER2
                 "bokepindo", "bokepindo.blog" -> BOKEPBOX
                 "pinayflixhd", "pinayflixhd.com" -> PORNKAI
                 "thaipornxxx", "pornthai", "thai", "thai_eporner" -> THAIPORNTV
-                "vietnam", "viet_eporner" -> QUATVN
+                "vietnam", "viet_eporner", "quatvn", "quatvn.asia" -> VLXX
                 // Removed / renamed sources
-                "jav_xvideos", "jav_eporner", "javguru", "jav.guru" -> MISSAV
+                "missav", "missav.ws", "missav.com", "jav_xvideos", "jav_eporner",
+                "javguru", "jav.guru",
+                -> JABLE
+                "supjav", "supjav.com" -> SUPJAV
                 "javff", "javff.com" -> JAVTSUNAMI
                 "hentaihaven", "hentaihaven.xxx", "hentaihaven.com" -> HENTAIMAMA
                 "ph_xvideos", "ph_eporner" -> PINAYOT
                 "pinayviral", "pinayviral.org" -> PINAYFLIX
                 "indonesia", "indo_eporner" -> INDO18
                 "myanmar", "myanmar_eporner", "mmporns", "drkogyi" -> BUUMAL
-                "shennana", "shennana.com" -> QUATVN
+                "shennana", "shennana.com" -> VLXX
                 "ok.xxx", "okxxx.com" -> OKXXX
                 else -> entries.firstOrNull { it.id.equals(id, ignoreCase = true) }
             }
